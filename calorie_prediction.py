@@ -5,28 +5,78 @@ This script implements a machine learning solution for predicting calories burne
 based on various physiological and activity parameters. It uses both CatBoost and XGBoost models
 and blends their predictions for the final output.
 
-Author: [Your Name]
+Author: [Diganta]
 Date: [Current Date]
 """
 
-import pandas as pd
-import numpy as np
+# Standard library imports
+import os
 import time
-import warnings
-import matplotlib.pyplot as plt
-import seaborn as sns
 import logging
-from sklearn.model_selection import StratifiedKFold, KFold, train_test_split
-from sklearn.preprocessing import KBinsDiscretizer, PowerTransformer, StandardScaler
-from sklearn.metrics import mean_squared_log_error
-from catboost import CatBoostRegressor
-from xgboost import XGBRegressor
-from scipy.stats import skew
-from tqdm import tqdm
+import warnings
+from datetime import datetime
+from collections import defaultdict
+from itertools import combinations
+
+# Third-party imports for data manipulation and analysis
+import numpy as np
+import pandas as pd
+import networkx as nx
+import seaborn as sns
+import matplotlib.pyplot as plt
+import plotly.express as px
+from scipy.stats import boxcox, skew, spearmanr, pearsonr
+from scipy.interpolate import LSQUnivariateSpline
+from scipy.io import arff
+from minepy import MINE
+import ppscore as pps
+import Levenshtein
+
+# Machine learning imports
+from sklearn.model_selection import (
+    train_test_split, StratifiedKFold, KFold, 
+    GridSearchCV, cross_val_score
+)
+from sklearn.preprocessing import (
+    LabelEncoder, StandardScaler, MinMaxScaler,
+    KBinsDiscretizer, PowerTransformer
+)
+from sklearn.ensemble import (
+    RandomForestRegressor, GradientBoostingClassifier,
+    VotingClassifier
+)
+from sklearn.metrics import (
+    mean_squared_error, accuracy_score, roc_auc_score,
+    roc_curve, mean_squared_log_error
+)
+from sklearn.impute import KNNImputer
+from sklearn.feature_selection import SelectKBest, chi2
+from sklearn.tree import DecisionTreeClassifier
+from sklearn.linear_model import LogisticRegression
+
+# Model-specific imports
+from xgboost import XGBRegressor, XGBClassifier
+from catboost import CatBoostRegressor, CatBoostClassifier
+import statsmodels.api as sm
+
+# Bayesian network imports
+import pgmpy.estimators as ests
+from pgmpy.estimators import TreeSearch
+from pgmpy.models import BayesianNetwork
+from pgmpy.metrics import structure_score
+from pgmpy.inference import BeliefPropagation, VariableElimination
+
+# Deep learning imports
 import torch
 import torch.nn as nn
 import torch.optim as optim
+import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
+
+# Utility imports
+import joblib
+from tqdm import tqdm
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # Configure logging
 logging.basicConfig(
@@ -51,138 +101,170 @@ def load_data():
     submission = pd.read_csv("/kaggle/input/playground-series-s5e5/sample_submission.csv")
     return train, test, submission
 
-def preprocess_data(train, test):
+def create_features(train_df, test_df):
     """
-    Preprocess the data by encoding categorical variables and handling duplicates.
-    
-    Args:
-        train (pd.DataFrame): Training data
-        test (pd.DataFrame): Test data
-        
-    Returns:
-        tuple: (processed_train, processed_test)
-    """
-    logger.info("Preprocessing data...")
-    # Convert sex to binary
-    train['Sex'] = train['Sex'].map({'male': 1, 'female': 0})
-    test['Sex'] = test['Sex'].map({'male': 1, 'female': 0})
-    
-    # Remove duplicates and get minimum calories for same features
-    train = train.drop_duplicates(subset=train.columns).reset_index(drop=True)
-    train = train.groupby(['Sex', 'Age', 'Height', 'Weight', 'Duration', 'Heart_Rate', 'Body_Temp'])['Calories'].min().reset_index()
-    
-    return train, test
-
-def add_features(df, train):
-    """
-    Add engineered features to the dataset.
-    
-    Args:
-        df (pd.DataFrame): Input dataframe
-        train (pd.DataFrame): Training dataframe for reference
-        
-    Returns:
-        pd.DataFrame: DataFrame with added features
-    """
-    logger.info("Adding engineered features...")
-    # Basic features
-    df['BMI'] = df['Weight'] / (df['Height'] / 100) ** 2
-    df['Intensity'] = df['Heart_Rate'] / df['Duration']
-    
-    # Duration-based features - use only durations present in training data
-    df['Sex_Reversed'] = 1 - df['Sex']
-    train_durations = sorted(train['Duration'].unique())
-    for dur in train_durations:
-        df[f'HR_Dur_{int(dur)}'] = np.where(df['Duration'] == dur, df['Heart_Rate'], 0)
-        df[f'Temp_Dur_{int(dur)}'] = np.where(df['Duration'] == dur, df['Body_Temp'], 0)
-    
-    # Age-based features - use only ages present in training data
-    train_ages = sorted(train['Age'].unique())
-    for age in train_ages:
-        df[f'HR_Age_{int(age)}'] = np.where(df['Age'] == age, df['Heart_Rate'], 0)
-        df[f'Temp_Age_{int(age)}'] = np.where(df['Age'] == age, df['Body_Temp'], 0)
-    
-    # Interaction features
-    for f1 in ['Duration', 'Heart_Rate', 'Body_Temp']:
-        for f2 in ['Sex', 'Sex_Reversed']:
-            df[f'{f1}_x_{f2}'] = df[f1] * df[f2]
-    
-    # Statistical features
-    for col in ['Height', 'Weight', 'Heart_Rate', 'Body_Temp']:
-        for agg in ['min', 'max']:
-            agg_val = train.groupby('Sex')[col].agg(agg).rename(f'Sex_{col}_{agg}')
-            df = df.merge(agg_val, on='Sex', how='left')
-    
-    df.drop(columns=['Sex_Reversed'], inplace=True)
-    return df
-
-def add_advanced_features(train_df, test_df):
-    """
-    Add advanced physiological features to the dataset.
+    Comprehensive feature engineering function that combines all feature creation steps
+    and adds polynomial features.
     
     Args:
         train_df (pd.DataFrame): Training dataframe
         test_df (pd.DataFrame): Test dataframe
         
     Returns:
-        tuple: (train_df, test_df) with added features
+        tuple: (processed_train_df, processed_test_df)
     """
-    logger.info("Adding advanced features...")
+    logger.info("Starting comprehensive feature engineering...")
+    print("\n=== Starting Feature Engineering ===")
     
-    # 1. Basal Metabolic Rate (BMR)
-    train_df['BMR'] = train_df['Weight'] / ((train_df['Height'] / 100) ** 2)
-    test_df['BMR'] = test_df['Weight'] / ((test_df['Height'] / 100) ** 2)
+    # Create copies to avoid modifying original dataframes
+    train_processed = train_df.copy()
+    test_processed = test_df.copy()
     
-    # 2. Metabolic Efficiency Index
-    train_df['Metabolic_Efficiency'] = train_df['BMR'] * (train_df['Heart_Rate'] / train_df['BMR'].median())
-    test_df['Metabolic_Efficiency'] = test_df['BMR'] * (test_df['Heart_Rate'] / test_df['BMR'].median())
+    # 1. Basic Preprocessing
+    logger.info("Performing basic preprocessing...")
+    print("Performing basic preprocessing...")
     
-    # 3. Cardiovascular Stress
-    train_df['Cardio_Stress'] = (train_df['Heart_Rate'] / (220 - train_df['Age'])) * train_df['Duration']
-    test_df['Cardio_Stress'] = (test_df['Heart_Rate'] / (220 - test_df['Age'])) * test_df['Duration']
+    # Convert sex to binary
+    train_processed['Sex'] = train_processed['Sex'].map({'male': 1, 'female': 0})
+    test_processed['Sex'] = test_processed['Sex'].map({'male': 1, 'female': 0})
     
-    # 4. Thermic Effect Ratio
-    train_df['Thermic_Effect'] = (train_df['Body_Temp'] * 100) / (train_df['Weight'] ** 0.5)
-    test_df['Thermic_Effect'] = (test_df['Body_Temp'] * 100) / (test_df['Weight'] ** 0.5)
+    # Remove duplicates and get minimum calories for same features
+    train_processed = train_processed.drop_duplicates(subset=train_processed.columns).reset_index(drop=True)
+    train_processed = train_processed.groupby(['Sex', 'Age', 'Height', 'Weight', 'Duration', 'Heart_Rate', 'Body_Temp'])['Calories'].min().reset_index()
     
-    # 5. Power Output Estimate
-    train_df['Power_Output'] = train_df['Weight'] * train_df['Duration'] * (train_df['Heart_Rate'] / 1000)
-    test_df['Power_Output'] = test_df['Weight'] * test_df['Duration'] * (test_df['Heart_Rate'] / 1000)
+    # 2. Basic Features
+    logger.info("Creating basic features...")
+    print("Creating basic features...")
     
-    # 6. Body Volume Index
-    train_df['BVI'] = train_df['Weight'] / ((train_df['Height']/100) ** 3)
-    test_df['BVI'] = test_df['Weight'] / ((test_df['Height']/100) ** 3)
+    # BMI and Intensity
+    train_processed['BMI'] = train_processed['Weight'] / (train_processed['Height'] / 100) ** 2
+    test_processed['BMI'] = test_processed['Weight'] / (test_processed['Height'] / 100) ** 2
     
-    # 7. Age-Adjusted Intensity
+    train_processed['Intensity'] = train_processed['Heart_Rate'] / train_processed['Duration']
+    test_processed['Intensity'] = test_processed['Heart_Rate'] / test_processed['Duration']
+    
+    # 3. Polynomial Features
+    logger.info("Creating polynomial features...")
+    print("Creating polynomial features...")
+    
+    # Define features for polynomial combinations
+    poly_features = ['Age', 'Height', 'Weight', 'Duration', 'Heart_Rate', 'Body_Temp', 'BMI']
+    
+    # Create polynomial features
+    for i in range(len(poly_features)):
+        for j in range(i+1, len(poly_features)):
+            feat1, feat2 = poly_features[i], poly_features[j]
+            
+            # Multiplication
+            train_processed[f'{feat1}_x_{feat2}'] = train_processed[feat1] * train_processed[feat2]
+            test_processed[f'{feat1}_x_{feat2}'] = test_processed[feat1] * test_processed[feat2]
+            
+            # Division (avoid division by zero)
+            train_processed[f'{feat1}_div_{feat2}'] = train_processed[feat1] / (train_processed[feat2] + 1e-6)
+            test_processed[f'{feat1}_div_{feat2}'] = test_processed[feat1] / (test_processed[feat2] + 1e-6)
+            
+            # Square of each feature
+            train_processed[f'{feat1}_squared'] = train_processed[feat1] ** 2
+            test_processed[f'{feat1}_squared'] = test_processed[feat1] ** 2
+    
+    # 4. Advanced Physiological Features
+    logger.info("Creating advanced physiological features...")
+    print("Creating advanced physiological features...")
+    
+    # Basal Metabolic Rate (BMR)
+    train_processed['BMR'] = train_processed['Weight'] / ((train_processed['Height'] / 100) ** 2)
+    test_processed['BMR'] = test_processed['Weight'] / ((test_processed['Height'] / 100) ** 2)
+    
+    # Metabolic Efficiency Index
+    train_processed['Metabolic_Efficiency'] = train_processed['BMR'] * (train_processed['Heart_Rate'] / train_processed['BMR'].median())
+    test_processed['Metabolic_Efficiency'] = test_processed['BMR'] * (test_processed['Heart_Rate'] / test_processed['BMR'].median())
+    
+    # Cardiovascular Stress
+    train_processed['Cardio_Stress'] = (train_processed['Heart_Rate'] / (220 - train_processed['Age'])) * train_processed['Duration']
+    test_processed['Cardio_Stress'] = (test_processed['Heart_Rate'] / (220 - test_processed['Age'])) * test_processed['Duration']
+    
+    # Thermic Effect Ratio
+    train_processed['Thermic_Effect'] = (train_processed['Body_Temp'] * 100) / (train_processed['Weight'] ** 0.5)
+    test_processed['Thermic_Effect'] = (test_processed['Body_Temp'] * 100) / (test_processed['Weight'] ** 0.5)
+    
+    # Power Output Estimate
+    train_processed['Power_Output'] = train_processed['Weight'] * train_processed['Duration'] * (train_processed['Heart_Rate'] / 1000)
+    test_processed['Power_Output'] = test_processed['Weight'] * test_processed['Duration'] * (test_processed['Heart_Rate'] / 1000)
+    
+    # 5. Interaction Features
+    logger.info("Creating interaction features...")
+    print("Creating interaction features...")
+    
+    # Duration-based features
+    train_durations = sorted(train_processed['Duration'].unique())
+    for dur in train_durations:
+        train_processed[f'HR_Dur_{int(dur)}'] = np.where(train_processed['Duration'] == dur, train_processed['Heart_Rate'], 0)
+        test_processed[f'HR_Dur_{int(dur)}'] = np.where(test_processed['Duration'] == dur, test_processed['Heart_Rate'], 0)
+        
+        train_processed[f'Temp_Dur_{int(dur)}'] = np.where(train_processed['Duration'] == dur, train_processed['Body_Temp'], 0)
+        test_processed[f'Temp_Dur_{int(dur)}'] = np.where(test_processed['Duration'] == dur, test_processed['Body_Temp'], 0)
+    
+    # Age-based features
+    train_ages = sorted(train_processed['Age'].unique())
+    for age in train_ages:
+        train_processed[f'HR_Age_{int(age)}'] = np.where(train_processed['Age'] == age, train_processed['Heart_Rate'], 0)
+        test_processed[f'HR_Age_{int(age)}'] = np.where(test_processed['Age'] == age, test_processed['Heart_Rate'], 0)
+        
+        train_processed[f'Temp_Age_{int(age)}'] = np.where(train_processed['Age'] == age, train_processed['Body_Temp'], 0)
+        test_processed[f'Temp_Age_{int(age)}'] = np.where(test_processed['Age'] == age, test_processed['Body_Temp'], 0)
+    
+    # 6. Statistical Features
+    logger.info("Creating statistical features...")
+    print("Creating statistical features...")
+    
+    for col in ['Height', 'Weight', 'Heart_Rate', 'Body_Temp']:
+        for agg in ['min', 'max']:
+            agg_val = train_processed.groupby('Sex')[col].agg(agg).rename(f'Sex_{col}_{agg}')
+            train_processed = train_processed.merge(agg_val, on='Sex', how='left')
+            test_processed = test_processed.merge(agg_val, on='Sex', how='left')
+    
+    # 7. Additional Derived Features
+    logger.info("Creating additional derived features...")
+    print("Creating additional derived features...")
+    
+    # Body Volume Index
+    train_processed['BVI'] = train_processed['Weight'] / ((train_processed['Height']/100) ** 3)
+    test_processed['BVI'] = test_processed['Weight'] / ((test_processed['Height']/100) ** 3)
+    
+    # Age-Adjusted Intensity
     bins = [18, 25, 35, 45, 55, 65, 100]
-    train_df['Age_Adj_Intensity'] = train_df['Duration'] * pd.cut(train_df['Age'], bins).cat.codes
-    test_df['Age_Adj_Intensity'] = test_df['Duration'] * pd.cut(test_df['Age'], bins).cat.codes
+    train_processed['Age_Adj_Intensity'] = train_processed['Duration'] * pd.cut(train_processed['Age'], bins).cat.codes
+    test_processed['Age_Adj_Intensity'] = test_processed['Duration'] * pd.cut(test_processed['Age'], bins).cat.codes
     
-    # 8. Gender-Specific Metabolic Rate
+    # Gender-Specific Metabolic Rate
     gender_coeff = {'male': 1.67, 'female': 1.55}
-    train_df['Gender_Metabolic'] = train_df['Sex'].map(gender_coeff) * train_df['BMR']
-    test_df['Gender_Metabolic'] = test_df['Sex'].map(gender_coeff) * test_df['BMR']
+    train_processed['Gender_Metabolic'] = train_processed['Sex'].map(gender_coeff) * train_processed['BMR']
+    test_processed['Gender_Metabolic'] = test_processed['Sex'].map(gender_coeff) * test_processed['BMR']
     
-    # 9. Cardiovascular Drift
-    train_df['HR_Drift'] = train_df.groupby('Age')['Heart_Rate'].diff() / train_df['Duration']
-    test_df['HR_Drift'] = test_df.groupby('Age')['Heart_Rate'].diff() / test_df['Duration']
+    # Cardiovascular Drift
+    train_processed['HR_Drift'] = train_processed.groupby('Age')['Heart_Rate'].diff() / train_processed['Duration']
+    test_processed['HR_Drift'] = test_processed.groupby('Age')['Heart_Rate'].diff() / test_processed['Duration']
     
-    # 10. Body Composition Index
-    train_df['BCI'] = (train_df['Weight'] * 1000) / (train_df['Height'] ** 1.5) * (1 / (train_df['Age'] ** 0.2))
-    test_df['BCI'] = (test_df['Weight'] * 1000) / (test_df['Height'] ** 1.5) * (1 / (test_df['Age'] ** 0.2))
+    # Body Composition Index
+    train_processed['BCI'] = (train_processed['Weight'] * 1000) / (train_processed['Height'] ** 1.5) * (1 / (train_processed['Age'] ** 0.2))
+    test_processed['BCI'] = (test_processed['Weight'] * 1000) / (test_processed['Height'] ** 1.5) * (1 / (test_processed['Age'] ** 0.2))
     
-    # 11. Thermal Work Capacity
-    train_df['Thermal_Work'] = (train_df['Body_Temp'] ** 2) * np.log1p(train_df['Duration'])
-    test_df['Thermal_Work'] = (test_df['Body_Temp'] ** 2) * np.log1p(test_df['Duration'])
+    # Thermal Work Capacity
+    train_processed['Thermal_Work'] = (train_processed['Body_Temp'] ** 2) * np.log1p(train_processed['Duration'])
+    test_processed['Thermal_Work'] = (test_processed['Body_Temp'] ** 2) * np.log1p(test_processed['Duration'])
     
-    # 12. Binary Features
-    train_df['Temp_Binary'] = np.where(train_df['Body_Temp'] <= 39.5, 0, 1)
-    test_df['Temp_Binary'] = np.where(test_df['Body_Temp'] <= 39.5, 0, 1)
+    # Binary Features
+    train_processed['Temp_Binary'] = np.where(train_processed['Body_Temp'] <= 39.5, 0, 1)
+    test_processed['Temp_Binary'] = np.where(test_processed['Body_Temp'] <= 39.5, 0, 1)
     
-    train_df['HeartRate_Binary'] = np.where(train_df['Heart_Rate'] <= 99.5, 0, 1)
-    test_df['HeartRate_Binary'] = np.where(test_df['Heart_Rate'] <= 99.5, 0, 1)
+    train_processed['HeartRate_Binary'] = np.where(train_processed['Heart_Rate'] <= 99.5, 0, 1)
+    test_processed['HeartRate_Binary'] = np.where(test_processed['Heart_Rate'] <= 99.5, 0, 1)
     
-    return train_df, test_df
+    # Log feature creation summary
+    logger.info(f"Created {len(train_processed.columns)} features")
+    print(f"Created {len(train_processed.columns)} features")
+    
+    return train_processed, test_processed
 
 def transform_features(train_df, test_df, numerical_features):
     """
@@ -279,7 +361,7 @@ def train_catboost(X, y, X_test):
         X_test (pd.DataFrame): Test features
         
     Returns:
-        tuple: (predictions, out-of-fold predictions)
+        tuple: (predictions, out-of-fold predictions, scores, model)
     """
     logger.info("Starting CatBoost training...")
     print("\n=== Starting CatBoost Training ===")
@@ -404,7 +486,7 @@ def train_catboost(X, y, X_test):
     print(f"  - Total training time: {total_time/60:.1f} minutes")
     print(f"  - Average fold time: {total_time/total_folds:.1f} seconds")
     
-    return cat_preds, cat_oof
+    return cat_preds, cat_oof, cat_scores, model
 
 def train_xgboost(X, y, X_test):
     """
@@ -416,7 +498,7 @@ def train_xgboost(X, y, X_test):
         X_test (pd.DataFrame): Test features
         
     Returns:
-        tuple: (predictions, out-of-fold predictions)
+        tuple: (predictions, out-of-fold predictions, scores, model)
     """
     logger.info("Starting XGBoost training...")
     print("\n=== Starting XGBoost Training ===")
@@ -535,7 +617,7 @@ def train_xgboost(X, y, X_test):
     print(f"  - Total training time: {total_time/60:.1f} minutes")
     print(f"  - Average fold time: {total_time/total_folds:.1f} seconds")
     
-    return xgb_preds, xgb_oof
+    return xgb_preds, xgb_oof, xgb_scores, model
 
 class CalorieDataset(Dataset):
     """Custom Dataset for loading calorie prediction data."""
@@ -551,35 +633,62 @@ class CalorieDataset(Dataset):
             return self.X[idx], self.y[idx]
         return self.X[idx]
 
+class ResBlock(nn.Module):
+    """Residual block with skip connection"""
+    def __init__(self, in_dim, out_dim):
+        super().__init__()
+        self.block = nn.Sequential(
+            nn.Linear(in_dim, out_dim),
+            nn.BatchNorm1d(out_dim),
+            nn.GELU(),
+            nn.Dropout(0.3),
+            nn.Linear(out_dim, out_dim),
+            nn.BatchNorm1d(out_dim),
+        )
+        self.shortcut = nn.Linear(in_dim, out_dim) if in_dim != out_dim else nn.Identity()
+        
+    def forward(self, x):
+        return F.gelu(self.block(x) + self.shortcut(x))
+
 class CalorieNet(nn.Module):
-    """Neural Network for calorie prediction."""
+    """Enhanced Neural Network for calorie prediction."""
     def __init__(self, input_dim):
         super(CalorieNet, self).__init__()
-        self.network = nn.Sequential(
-            nn.Linear(input_dim, 512),
-            nn.BatchNorm1d(512),
-            nn.ReLU(),
-            nn.Dropout(0.3),
+        self.base = nn.Sequential(
+            nn.Linear(input_dim, 1024),
+            nn.BatchNorm1d(1024),
+            nn.SiLU(),
+            nn.Dropout(0.5),
             
-            nn.Linear(512, 256),
-            nn.BatchNorm1d(256),
-            nn.ReLU(),
-            nn.Dropout(0.2),
-            
-            nn.Linear(256, 128),
-            nn.BatchNorm1d(128),
-            nn.ReLU(),
-            nn.Dropout(0.1),
+            ResBlock(1024, 512),
+            ResBlock(512, 256),
+            ResBlock(256, 128),
             
             nn.Linear(128, 64),
             nn.BatchNorm1d(64),
-            nn.ReLU(),
-            
-            nn.Linear(64, 1)
+            nn.GELU(),
+        )
+        self.head = nn.Sequential(
+            nn.Linear(64, 32),
+            nn.BatchNorm1d(32),
+            nn.GELU(),
+            nn.Dropout(0.2),
+            nn.Linear(32, 1)
         )
         
+        # Initialize weights
+        self._init_weights()
+        
+    def _init_weights(self):
+        for m in self.modules():
+            if isinstance(m, nn.Linear):
+                nn.init.kaiming_normal_(m.weight)
+                if m.bias is not None:
+                    nn.init.constant_(m.bias, 0)
+                
     def forward(self, x):
-        return self.network(x)
+        x = self.base(x)
+        return self.head(x)
 
 def train_neural_network(X, y, X_test):
     """
@@ -591,7 +700,7 @@ def train_neural_network(X, y, X_test):
         X_test (pd.DataFrame): Test features
         
     Returns:
-        tuple: (predictions, out-of-fold predictions)
+        tuple: (predictions, out-of-fold predictions, scores, model)
     """
     logger.info("Starting Neural Network training...")
     print("\n=== Starting Neural Network Training ===")
@@ -621,11 +730,12 @@ def train_neural_network(X, y, X_test):
     nn_oof = np.zeros(len(X_nn))
     nn_scores = []
     
-    # Training parameters
-    BATCH_SIZE = 256
-    EPOCHS = 100
-    LEARNING_RATE = 0.001
-    WEIGHT_DECAY = 1e-5
+    # Enhanced training parameters
+    BATCH_SIZE = 128  # Reduced batch size for better generalization
+    EPOCHS = 200      # Increased epochs with better regularization
+    LEARNING_RATE = 3e-4
+    WEIGHT_DECAY = 1e-4
+    PATIENCE = 15      # Increased patience
     
     # Cross-validation
     kf = KFold(n_splits=5, shuffle=True, random_state=42)
@@ -653,15 +763,20 @@ def train_neural_network(X, y, X_test):
         train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True)
         val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False)
         
-        # Initialize model
+        # Enhanced model configuration
         model = CalorieNet(input_dim=X_scaled.shape[1]).to(device)
-        criterion = nn.MSELoss()
-        optimizer = optim.AdamW(model.parameters(), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY)
-        scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=5, verbose=True)
+        criterion = nn.HuberLoss()  # More robust loss
+        optimizer = optim.AdamW(model.parameters(), lr=LEARNING_RATE, 
+                               weight_decay=WEIGHT_DECAY, amsgrad=True)
+        scheduler = optim.lr_scheduler.OneCycleLR(
+            optimizer, 
+            max_lr=LEARNING_RATE*3,
+            total_steps=EPOCHS*len(train_loader),
+            pct_start=0.3
+        )
         
         # Training loop
         best_val_loss = float('inf')
-        patience = 10
         patience_counter = 0
         
         for epoch in range(EPOCHS):
@@ -673,8 +788,17 @@ def train_neural_network(X, y, X_test):
                 optimizer.zero_grad()
                 outputs = model(batch_X)
                 loss = criterion(outputs.squeeze(), batch_y)
+                
+                # Add L2 regularization manually
+                l2_reg = torch.tensor(0.).to(device)
+                for param in model.parameters():
+                    l2_reg += torch.norm(param)
+                loss += 1e-5 * l2_reg
+                
                 loss.backward()
+                torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
                 optimizer.step()
+                scheduler.step()
                 
                 train_loss += loss.item()
             
@@ -690,13 +814,11 @@ def train_neural_network(X, y, X_test):
                     val_preds.extend(outputs.cpu().numpy())
             
             val_loss /= len(val_loader)
-            scheduler.step(val_loss)
             
-            # Early stopping
-            if val_loss < best_val_loss:
+            # Enhanced early stopping with dynamic patience
+            if val_loss < best_val_loss * 0.9999:  # Allow small improvements
                 best_val_loss = val_loss
                 patience_counter = 0
-                # Save best model predictions
                 nn_oof[val_idx] = np.array(val_preds).flatten()
             else:
                 patience_counter += 1
@@ -705,7 +827,7 @@ def train_neural_network(X, y, X_test):
                 logger.info(f"Epoch {epoch+1}/{EPOCHS} - Train Loss: {train_loss/len(train_loader):.4f} - Val Loss: {val_loss:.4f}")
                 print(f"Epoch {epoch+1}/{EPOCHS} - Train Loss: {train_loss/len(train_loader):.4f} - Val Loss: {val_loss:.4f}")
             
-            if patience_counter >= patience:
+            if patience_counter >= PATIENCE:
                 logger.info(f"Early stopping at epoch {epoch+1}")
                 print(f"Early stopping at epoch {epoch+1}")
                 break
@@ -764,7 +886,185 @@ def train_neural_network(X, y, X_test):
     print(f"  - Total training time: {total_time/60:.1f} minutes")
     print(f"  - Average fold time: {total_time/total_folds:.1f} seconds")
     
-    return nn_preds, nn_oof
+    return nn_preds, nn_oof, nn_scores, model
+
+def save_model_and_metrics(model, model_name, metrics, model_dir='saved_models'):
+    """
+    Save model and its metrics to disk.
+    
+    Args:
+        model: Trained model object
+        model_name (str): Name of the model (e.g., 'catboost', 'xgboost', 'neural_net')
+        metrics (dict): Dictionary containing model metrics
+        model_dir (str): Directory to save models
+    """
+    # Create directory if it doesn't exist
+    os.makedirs(model_dir, exist_ok=True)
+    
+    # Generate timestamp for unique model version
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    model_filename = f"{model_name}_{timestamp}.joblib"
+    model_path = os.path.join(model_dir, model_filename)
+    
+    # Save model
+    joblib.dump(model, model_path)
+    
+    # Save metrics
+    metrics_filename = f"{model_name}_{timestamp}_metrics.joblib"
+    metrics_path = os.path.join(model_dir, metrics_filename)
+    joblib.dump(metrics, metrics_path)
+    
+    logger.info(f"Saved model and metrics to {model_dir}")
+    print(f"Saved model and metrics to {model_dir}")
+    
+    return model_path, metrics_path
+
+def load_latest_model(model_name, model_dir='saved_models'):
+    """
+    Load the latest saved model and its metrics.
+    
+    Args:
+        model_name (str): Name of the model to load
+        model_dir (str): Directory containing saved models
+        
+    Returns:
+        tuple: (model, metrics, model_path, metrics_path)
+    """
+    # Get all files for the model
+    model_files = [f for f in os.listdir(model_dir) if f.startswith(model_name) and f.endswith('.joblib')]
+    if not model_files:
+        return None, None, None, None
+    
+    # Get latest model file
+    latest_model_file = sorted(model_files)[-1]
+    model_path = os.path.join(model_dir, latest_model_file)
+    
+    # Get corresponding metrics file
+    metrics_file = latest_model_file.replace('.joblib', '_metrics.joblib')
+    metrics_path = os.path.join(model_dir, metrics_file)
+    
+    # Load model and metrics
+    model = joblib.load(model_path)
+    metrics = joblib.load(metrics_path)
+    
+    logger.info(f"Loaded model from {model_path}")
+    print(f"Loaded model from {model_path}")
+    
+    return model, metrics, model_path, metrics_path
+
+def create_model_comparison_df(model_dir='saved_models'):
+    """
+    Create a DataFrame comparing all saved models.
+    
+    Args:
+        model_dir (str): Directory containing saved models
+        
+    Returns:
+        pd.DataFrame: Comparison DataFrame
+    """
+    comparison_data = []
+    
+    # Get all metrics files
+    metrics_files = [f for f in os.listdir(model_dir) if f.endswith('_metrics.joblib')]
+    
+    for metrics_file in metrics_files:
+        metrics_path = os.path.join(model_dir, metrics_file)
+        metrics = joblib.load(metrics_path)
+        
+        # Extract model name and timestamp
+        model_name = metrics_file.split('_')[0]
+        timestamp = '_'.join(metrics_file.split('_')[1:-1])
+        
+        # Add to comparison data
+        comparison_data.append({
+            'model_name': model_name,
+            'timestamp': timestamp,
+            **metrics
+        })
+    
+    # Create DataFrame
+    comparison_df = pd.DataFrame(comparison_data)
+    comparison_df['timestamp'] = pd.to_datetime(comparison_df['timestamp'], format='%Y%m%d_%H%M%S')
+    comparison_df = comparison_df.sort_values('timestamp', ascending=False)
+    
+    return comparison_df
+
+def warm_start_training(X, y, X_test, model_name, model_dir='saved_models'):
+    """
+    Warm start training using the latest saved model.
+    
+    Args:
+        X (pd.DataFrame): Training features
+        y (pd.Series): Target variable
+        X_test (pd.DataFrame): Test features
+        model_name (str): Name of the model to warm start
+        model_dir (str): Directory containing saved models
+        
+    Returns:
+        tuple: (predictions, out-of-fold predictions, metrics)
+    """
+    # Load latest model
+    model, old_metrics, model_path, metrics_path = load_latest_model(model_name, model_dir)
+    
+    if model is None:
+        logger.info(f"No saved model found for {model_name}, starting fresh training")
+        print(f"No saved model found for {model_name}, starting fresh training")
+        return None, None, None
+    
+    logger.info(f"Warm starting {model_name} from {model_path}")
+    print(f"Warm starting {model_name} from {model_path}")
+    
+    # Train model based on type
+    if model_name == 'catboost':
+        preds, oof, scores, model = train_catboost(X, y, X_test)
+    elif model_name == 'xgboost':
+        preds, oof, scores, model = train_xgboost(X, y, X_test)
+    elif model_name == 'neural_net':
+        preds, oof, scores, model = train_neural_network(X, y, X_test)
+    else:
+        raise ValueError(f"Unknown model name: {model_name}")
+    
+    # Calculate metrics
+    metrics = {
+        'train_rmsle': old_metrics.get('train_rmsle', 0),
+        'val_rmsle': old_metrics.get('val_rmsle', 0),
+        'test_rmsle': old_metrics.get('test_rmsle', 0),
+        'improvement': old_metrics.get('improvement', 0),
+        'training_time': old_metrics.get('training_time', 0),
+        'model_specs': old_metrics.get('model_specs', {})
+    }
+    
+    return preds, oof, metrics
+
+def update_model_comparison(model_name, new_metrics, model_dir='saved_models'):
+    """
+    Update the model comparison DataFrame with new metrics.
+    
+    Args:
+        model_name (str): Name of the model
+        new_metrics (dict): New metrics to add
+        model_dir (str): Directory containing saved models
+        
+    Returns:
+        pd.DataFrame: Updated comparison DataFrame
+    """
+    # Load existing comparison
+    comparison_df = create_model_comparison_df(model_dir)
+    
+    # Add new metrics
+    new_row = {
+        'model_name': model_name,
+        'timestamp': datetime.now(),
+        **new_metrics
+    }
+    
+    comparison_df = pd.concat([pd.DataFrame([new_row]), comparison_df], ignore_index=True)
+    
+    # Save updated comparison
+    comparison_path = os.path.join(model_dir, 'model_comparison.csv')
+    comparison_df.to_csv(comparison_path, index=False)
+    
+    return comparison_df
 
 def main():
     """Main execution function."""
@@ -777,18 +1077,15 @@ def main():
         'Temp_Binary', 'HeartRate_Binary', 'Sex'
     ]
     
-    # Load and preprocess data
+    # Load data
     train_df, test_df, submission_df = load_data()
-    train_df, test_df = preprocess_data(train_df, test_df)
     
-    # Feature engineering
-    train_df = add_features(train_df, train_df)
-    test_df = add_features(test_df, train_df)
-    train_df, test_df = add_advanced_features(train_df, test_df)
+    # Create features
+    train_processed, test_processed = create_features(train_df, test_df)
     
     # Transform features
     train_df_transformed, test_df_transformed = transform_features(
-        train_df, test_df, numerical_features
+        train_processed, test_processed, numerical_features
     )
     
     # Remove outliers
@@ -800,10 +1097,51 @@ def main():
     y = np.log1p(cleaned_train_df['Calories'])
     X_test = cleaned_test_df.drop(columns=['id'])
     
-    # Train models
-    cat_preds, cat_oof = train_catboost(X, y, X_test)
-    xgb_preds, xgb_oof = train_xgboost(X, y, X_test)
-    nn_preds, nn_oof = train_neural_network(X, y, X_test)
+    # Train models and save them
+    cat_preds, cat_oof, cat_scores, cat_model = train_catboost(X, y, X_test)
+    cat_metrics = {
+        'train_rmsle': np.sqrt(mean_squared_log_error(np.expm1(y), np.expm1(cat_oof))),
+        'val_rmsle': np.mean(cat_scores),
+        'test_rmsle': np.sqrt(mean_squared_log_error(np.expm1(y), np.expm1(cat_preds))),
+        'improvement': 0,  # Will be updated in future runs
+        'training_time': total_time,
+        'model_specs': cat_params
+    }
+    save_model_and_metrics(cat_model, 'catboost', cat_metrics)
+    
+    xgb_preds, xgb_oof, xgb_scores, xgb_model = train_xgboost(X, y, X_test)
+    xgb_metrics = {
+        'train_rmsle': np.sqrt(mean_squared_log_error(np.expm1(y), np.expm1(xgb_oof))),
+        'val_rmsle': np.mean(xgb_scores),
+        'test_rmsle': np.sqrt(mean_squared_log_error(np.expm1(y), np.expm1(xgb_preds))),
+        'improvement': 0,
+        'training_time': total_time,
+        'model_specs': xgb_params
+    }
+    save_model_and_metrics(xgb_model, 'xgboost', xgb_metrics)
+    
+    nn_preds, nn_oof, nn_scores, nn_model = train_neural_network(X, y, X_test)
+    nn_metrics = {
+        'train_rmsle': np.sqrt(mean_squared_log_error(np.expm1(y), np.expm1(nn_oof))),
+        'val_rmsle': np.mean(nn_scores),
+        'test_rmsle': np.sqrt(mean_squared_log_error(np.expm1(y), np.expm1(nn_preds))),
+        'improvement': 0,
+        'training_time': total_time,
+        'model_specs': {
+            'batch_size': BATCH_SIZE,
+            'epochs': EPOCHS,
+            'learning_rate': LEARNING_RATE,
+            'weight_decay': WEIGHT_DECAY
+        }
+    }
+    save_model_and_metrics(nn_model, 'neural_net', nn_metrics)
+    
+    # Create and display model comparison
+    comparison_df = create_model_comparison_df()
+    logger.info("\nModel Comparison:")
+    logger.info(comparison_df)
+    print("\nModel Comparison:")
+    print(comparison_df)
     
     # Create submission with all three models
     final_preds = 0.35 * np.expm1(xgb_preds) + 0.35 * np.expm1(cat_preds) + 0.30 * np.expm1(nn_preds)
@@ -828,14 +1166,36 @@ def plot_predictions(cat_oof, xgb_oof, nn_oof):
         xgb_oof (np.array): XGBoost out-of-fold predictions
         nn_oof (np.array): Neural Network out-of-fold predictions
     """
-    plt.figure(figsize=(12, 6))
-    plt.hist(np.expm1(cat_oof), bins=50, alpha=0.4, label='CatBoost OOF')
-    plt.hist(np.expm1(xgb_oof), bins=50, alpha=0.4, label='XGBoost OOF')
-    plt.hist(np.expm1(nn_oof), bins=50, alpha=0.4, label='Neural Network OOF')
-    plt.title("OOF Prediction Distribution")
-    plt.xlabel("Calories")
-    plt.ylabel("Frequency")
-    plt.legend()
+    plt.figure(figsize=(15, 10))
+    
+    # Create subplots
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(15, 12))
+    
+    # Plot 1: Distribution of predictions
+    ax1.hist(np.expm1(cat_oof), bins=50, alpha=0.4, label='CatBoost OOF', density=True)
+    ax1.hist(np.expm1(xgb_oof), bins=50, alpha=0.4, label='XGBoost OOF', density=True)
+    ax1.hist(np.expm1(nn_oof), bins=50, alpha=0.4, label='Neural Network OOF', density=True)
+    ax1.set_title("OOF Prediction Distribution")
+    ax1.set_xlabel("Calories")
+    ax1.set_ylabel("Density")
+    ax1.legend()
+    
+    # Plot 2: Scatter plot of predictions
+    ax2.scatter(np.expm1(cat_oof), np.expm1(xgb_oof), alpha=0.5, label='CatBoost vs XGBoost')
+    ax2.scatter(np.expm1(cat_oof), np.expm1(nn_oof), alpha=0.5, label='CatBoost vs Neural Network')
+    ax2.scatter(np.expm1(xgb_oof), np.expm1(nn_oof), alpha=0.5, label='XGBoost vs Neural Network')
+    
+    # Add diagonal line
+    min_val = min(np.min(np.expm1(cat_oof)), np.min(np.expm1(xgb_oof)), np.min(np.expm1(nn_oof)))
+    max_val = max(np.max(np.expm1(cat_oof)), np.max(np.expm1(xgb_oof)), np.max(np.expm1(nn_oof)))
+    ax2.plot([min_val, max_val], [min_val, max_val], 'r--', label='Perfect Correlation')
+    
+    ax2.set_title("Model Predictions Comparison")
+    ax2.set_xlabel("Predictions from Model 1")
+    ax2.set_ylabel("Predictions from Model 2")
+    ax2.legend()
+    
+    plt.tight_layout()
     plt.show()
 
 if __name__ == "__main__":
