@@ -39,7 +39,7 @@ from sklearn.model_selection import (
 )
 from sklearn.preprocessing import (
     LabelEncoder, StandardScaler, MinMaxScaler,
-    KBinsDiscretizer, PowerTransformer
+    KBinsDiscretizer, PowerTransformer, RobustScaler
 )
 from sklearn.ensemble import (
     RandomForestRegressor, GradientBoostingClassifier,
@@ -361,7 +361,7 @@ def train_catboost(X, y, X_test):
         X_test (pd.DataFrame): Test features
         
     Returns:
-        tuple: (predictions, out-of-fold predictions, scores, model)
+        tuple: (predictions, out-of-fold predictions, scores, model, total_time, params)
     """
     logger.info("Starting CatBoost training...")
     print("\n=== Starting CatBoost Training ===")
@@ -486,7 +486,7 @@ def train_catboost(X, y, X_test):
     print(f"  - Total training time: {total_time/60:.1f} minutes")
     print(f"  - Average fold time: {total_time/total_folds:.1f} seconds")
     
-    return cat_preds, cat_oof, cat_scores, model
+    return cat_preds, cat_oof, cat_scores, model, total_time, cat_params
 
 def train_xgboost(X, y, X_test):
     """
@@ -498,7 +498,7 @@ def train_xgboost(X, y, X_test):
         X_test (pd.DataFrame): Test features
         
     Returns:
-        tuple: (predictions, out-of-fold predictions, scores, model)
+        tuple: (predictions, out-of-fold predictions, scores, model, total_time)
     """
     logger.info("Starting XGBoost training...")
     print("\n=== Starting XGBoost Training ===")
@@ -522,7 +522,7 @@ def train_xgboost(X, y, X_test):
     # Initialize prediction arrays
     xgb_oof = np.zeros(len(X))
     xgb_preds = np.zeros(len(X_test))
-    xgb_scores = []
+    xgb_scores = []  # Initialize scores list
 
     # XGBoost parameters
     xgb_params = {
@@ -577,11 +577,14 @@ def train_xgboost(X, y, X_test):
         xgb_oof[val_idx] = model.predict(X_xgb.iloc[val_idx])
         xgb_preds += model.predict(X_test_xgb) / kf.n_splits
         
-        # Calculate fold score
+        # Calculate fold score using RMSLE
         fold_score = np.sqrt(mean_squared_log_error(
             np.expm1(y.iloc[val_idx]), 
             np.expm1(xgb_oof[val_idx])
         ))
+        
+        # Store fold score
+        xgb_scores.append(fold_score)
         
         # Calculate fold timing
         fold_time = time.time() - fold_start_time
@@ -592,8 +595,6 @@ def train_xgboost(X, y, X_test):
         print(f"\nFold {fold} completed:")
         print(f"  - RMSLE Score: {fold_score:.5f}")
         print(f"  - Time taken: {fold_time:.2f} seconds")
-        
-        xgb_scores.append(fold_score)
         
         # Estimate remaining time
         if fold < total_folds:
@@ -617,7 +618,7 @@ def train_xgboost(X, y, X_test):
     print(f"  - Total training time: {total_time/60:.1f} minutes")
     print(f"  - Average fold time: {total_time/total_folds:.1f} seconds")
     
-    return xgb_preds, xgb_oof, xgb_scores, model
+    return xgb_preds, xgb_oof, xgb_scores, model, total_time
 
 class CalorieDataset(Dataset):
     """Custom Dataset for loading calorie prediction data."""
@@ -700,7 +701,7 @@ def train_neural_network(X, y, X_test):
         X_test (pd.DataFrame): Test features
         
     Returns:
-        tuple: (predictions, out-of-fold predictions, scores, model)
+        tuple: (predictions, out-of-fold predictions, scores, model, total_time)
     """
     logger.info("Starting Neural Network training...")
     print("\n=== Starting Neural Network Training ===")
@@ -717,13 +718,13 @@ def train_neural_network(X, y, X_test):
     X_nn = X[common_features].copy()
     X_test_nn = X_test[common_features].copy()
     
-    # Scale features
-    scaler = StandardScaler()
+    # Scale features using RobustScaler for better handling of outliers
+    scaler = RobustScaler()
     X_scaled = scaler.fit_transform(X_nn)
     X_test_scaled = scaler.transform(X_test_nn)
     
-    # Convert target to numpy array
-    y_np = y.values
+    # Convert target to numpy array and ensure it's positive
+    y_np = np.clip(y.values, 0, None)
     
     # Initialize prediction arrays
     nn_preds = np.zeros(len(X_test_nn))
@@ -731,11 +732,12 @@ def train_neural_network(X, y, X_test):
     nn_scores = []
     
     # Enhanced training parameters
-    BATCH_SIZE = 128  # Reduced batch size for better generalization
-    EPOCHS = 200      # Increased epochs with better regularization
-    LEARNING_RATE = 3e-4
-    WEIGHT_DECAY = 1e-4
-    PATIENCE = 15      # Increased patience
+    BATCH_SIZE = 32  # Smaller batch size for better stability
+    EPOCHS = 300     # More epochs with better early stopping
+    LEARNING_RATE = 5e-4  # Lower learning rate for stability
+    WEIGHT_DECAY = 1e-6   # Reduced weight decay
+    PATIENCE = 25         # Increased patience
+    MIN_DELTA = 1e-4      # Minimum change in validation loss
     
     # Cross-validation
     kf = KFold(n_splits=5, shuffle=True, random_state=42)
@@ -765,72 +767,98 @@ def train_neural_network(X, y, X_test):
         
         # Enhanced model configuration
         model = CalorieNet(input_dim=X_scaled.shape[1]).to(device)
-        criterion = nn.HuberLoss()  # More robust loss
+        criterion = nn.SmoothL1Loss()  # Using Huber loss for better stability
         optimizer = optim.AdamW(model.parameters(), lr=LEARNING_RATE, 
                                weight_decay=WEIGHT_DECAY, amsgrad=True)
-        scheduler = optim.lr_scheduler.OneCycleLR(
-            optimizer, 
-            max_lr=LEARNING_RATE*3,
-            total_steps=EPOCHS*len(train_loader),
-            pct_start=0.3
+        scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer, mode='min', factor=0.5, patience=5, 
+            min_lr=1e-6, verbose=True
         )
         
         # Training loop
         best_val_loss = float('inf')
         patience_counter = 0
+        best_model_state = None
         
         for epoch in range(EPOCHS):
             model.train()
             train_loss = 0
+            train_batches = 0
+            
             for batch_X, batch_y in train_loader:
                 batch_X, batch_y = batch_X.to(device), batch_y.to(device)
                 
+                # Forward pass
                 optimizer.zero_grad()
                 outputs = model(batch_X)
-                loss = criterion(outputs.squeeze(), batch_y)
+                
+                # Ensure outputs are valid
+                outputs = torch.clamp(outputs.squeeze(), min=0.0)
+                
+                # Calculate loss
+                loss = criterion(outputs, batch_y)
                 
                 # Add L2 regularization manually
                 l2_reg = torch.tensor(0.).to(device)
                 for param in model.parameters():
                     l2_reg += torch.norm(param)
-                loss += 1e-5 * l2_reg
+                loss += 1e-6 * l2_reg  # Reduced L2 regularization
                 
+                # Backward pass
                 loss.backward()
-                torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-                optimizer.step()
-                scheduler.step()
                 
+                # Gradient clipping
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                
+                # Update weights
+                optimizer.step()
+                
+                # Update metrics
                 train_loss += loss.item()
+                train_batches += 1
+            
+            # Calculate average training loss
+            avg_train_loss = train_loss / train_batches
             
             # Validation
             model.eval()
             val_loss = 0
+            val_batches = 0
             val_preds = []
+            
             with torch.no_grad():
                 for batch_X, batch_y in val_loader:
                     batch_X, batch_y = batch_X.to(device), batch_y.to(device)
                     outputs = model(batch_X)
-                    val_loss += criterion(outputs.squeeze(), batch_y).item()
+                    outputs = torch.clamp(outputs.squeeze(), min=0.0)
+                    val_loss += criterion(outputs, batch_y).item()
                     val_preds.extend(outputs.cpu().numpy())
+                    val_batches += 1
             
-            val_loss /= len(val_loader)
+            avg_val_loss = val_loss / val_batches
+            scheduler.step(avg_val_loss)
             
             # Enhanced early stopping with dynamic patience
-            if val_loss < best_val_loss * 0.9999:  # Allow small improvements
-                best_val_loss = val_loss
+            if avg_val_loss < best_val_loss - MIN_DELTA:
+                best_val_loss = avg_val_loss
                 patience_counter = 0
+                best_model_state = model.state_dict().copy()
                 nn_oof[val_idx] = np.array(val_preds).flatten()
             else:
                 patience_counter += 1
             
             if epoch % 10 == 0:
-                logger.info(f"Epoch {epoch+1}/{EPOCHS} - Train Loss: {train_loss/len(train_loader):.4f} - Val Loss: {val_loss:.4f}")
-                print(f"Epoch {epoch+1}/{EPOCHS} - Train Loss: {train_loss/len(train_loader):.4f} - Val Loss: {val_loss:.4f}")
+                logger.info(f"Epoch {epoch+1}/{EPOCHS} - Train Loss: {avg_train_loss:.4f} - Val Loss: {avg_val_loss:.4f}")
+                print(f"Epoch {epoch+1}/{EPOCHS} - Train Loss: {avg_train_loss:.4f} - Val Loss: {avg_val_loss:.4f}")
             
             if patience_counter >= PATIENCE:
                 logger.info(f"Early stopping at epoch {epoch+1}")
                 print(f"Early stopping at epoch {epoch+1}")
                 break
+        
+        # Load best model state
+        if best_model_state is not None:
+            model.load_state_dict(best_model_state)
         
         # Make predictions on test set
         test_dataset = CalorieDataset(X_test_scaled)
@@ -842,11 +870,14 @@ def train_neural_network(X, y, X_test):
             for batch_X in test_loader:
                 batch_X = batch_X.to(device)
                 outputs = model(batch_X)
+                outputs = torch.clamp(outputs.squeeze(), min=0.0)
                 test_preds.extend(outputs.cpu().numpy())
         
-        nn_preds += np.array(test_preds).flatten() / kf.n_splits
+        # Ensure predictions are positive and within bounds
+        test_preds = np.clip(np.array(test_preds).flatten(), 0, 314)
+        nn_preds += test_preds / kf.n_splits
         
-        # Calculate fold score
+        # Calculate fold score using RMSLE
         fold_score = np.sqrt(mean_squared_log_error(
             np.expm1(y_np[val_idx]), 
             np.expm1(nn_oof[val_idx])
@@ -886,7 +917,7 @@ def train_neural_network(X, y, X_test):
     print(f"  - Total training time: {total_time/60:.1f} minutes")
     print(f"  - Average fold time: {total_time/total_folds:.1f} seconds")
     
-    return nn_preds, nn_oof, nn_scores, model
+    return nn_preds, nn_oof, nn_scores, model, total_time
 
 def save_model_and_metrics(model, model_name, metrics, model_dir='saved_models'):
     """
@@ -1016,11 +1047,11 @@ def warm_start_training(X, y, X_test, model_name, model_dir='saved_models'):
     
     # Train model based on type
     if model_name == 'catboost':
-        preds, oof, scores, model = train_catboost(X, y, X_test)
+        preds, oof, scores, model, total_time, params = train_catboost(X, y, X_test)
     elif model_name == 'xgboost':
-        preds, oof, scores, model = train_xgboost(X, y, X_test)
+        preds, oof, scores, model, total_time = train_xgboost(X, y, X_test)
     elif model_name == 'neural_net':
-        preds, oof, scores, model = train_neural_network(X, y, X_test)
+        preds, oof, scores, model, total_time = train_neural_network(X, y, X_test)
     else:
         raise ValueError(f"Unknown model name: {model_name}")
     
@@ -1028,7 +1059,7 @@ def warm_start_training(X, y, X_test, model_name, model_dir='saved_models'):
     metrics = {
         'train_rmsle': old_metrics.get('train_rmsle', 0),
         'val_rmsle': old_metrics.get('val_rmsle', 0),
-        'test_rmsle': old_metrics.get('test_rmsle', 0),
+        'test_rmsle': None,  # We don't have true test values
         'improvement': old_metrics.get('improvement', 0),
         'training_time': old_metrics.get('training_time', 0),
         'model_specs': old_metrics.get('model_specs', {})
@@ -1098,35 +1129,35 @@ def main():
     X_test = cleaned_test_df.drop(columns=['id'])
     
     # Train models and save them
-    cat_preds, cat_oof, cat_scores, cat_model = train_catboost(X, y, X_test)
+    cat_preds, cat_oof, cat_scores, cat_model, cat_total_time, cat_params = train_catboost(X, y, X_test)
     cat_metrics = {
         'train_rmsle': np.sqrt(mean_squared_log_error(np.expm1(y), np.expm1(cat_oof))),
         'val_rmsle': np.mean(cat_scores),
-        'test_rmsle': np.sqrt(mean_squared_log_error(np.expm1(y), np.expm1(cat_preds))),
+        'test_rmsle': None,  # We don't have true test values
         'improvement': 0,  # Will be updated in future runs
-        'training_time': total_time,
+        'training_time': cat_total_time,
         'model_specs': cat_params
     }
     save_model_and_metrics(cat_model, 'catboost', cat_metrics)
     
-    xgb_preds, xgb_oof, xgb_scores, xgb_model = train_xgboost(X, y, X_test)
+    xgb_preds, xgb_oof, xgb_scores, xgb_model, xgb_total_time = train_xgboost(X, y, X_test)
     xgb_metrics = {
         'train_rmsle': np.sqrt(mean_squared_log_error(np.expm1(y), np.expm1(xgb_oof))),
         'val_rmsle': np.mean(xgb_scores),
-        'test_rmsle': np.sqrt(mean_squared_log_error(np.expm1(y), np.expm1(xgb_preds))),
-        'improvement': 0,
-        'training_time': total_time,
+        'test_rmsle': None,  # We don't have true test values
+        'improvement': 0,  # Will be updated in future runs
+        'training_time': xgb_total_time,
         'model_specs': xgb_params
     }
     save_model_and_metrics(xgb_model, 'xgboost', xgb_metrics)
     
-    nn_preds, nn_oof, nn_scores, nn_model = train_neural_network(X, y, X_test)
+    nn_preds, nn_oof, nn_scores, nn_model, nn_total_time = train_neural_network(X, y, X_test)
     nn_metrics = {
         'train_rmsle': np.sqrt(mean_squared_log_error(np.expm1(y), np.expm1(nn_oof))),
         'val_rmsle': np.mean(nn_scores),
-        'test_rmsle': np.sqrt(mean_squared_log_error(np.expm1(y), np.expm1(nn_preds))),
+        'test_rmsle': None,  # We don't have true test values
         'improvement': 0,
-        'training_time': total_time,
+        'training_time': nn_total_time,
         'model_specs': {
             'batch_size': BATCH_SIZE,
             'epochs': EPOCHS,
