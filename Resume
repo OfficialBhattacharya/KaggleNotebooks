@@ -1,0 +1,238 @@
+\documentclass[a4paper,10pt]{article}
+%-----------------------------------------------------------
+\usepackage[top=0.75in, bottom=0.75in, left=0.55in, right=0.85in]{geometry}
+\usepackage{graphicx}
+\usepackage{url}
+\usepackage{hyperref}
+\usepackage{xcolor}
+\usepackage{palatino}
+\usepackage{tabularx}
+\fontfamily{SansSerif}
+\selectfont
+
+\usepackage[T1]{fontenc}
+\usepackage
+%[ansinew]
+[utf8]
+{inputenc}
+
+\usepackage{color}
+\definecolor{mygrey}{gray}{0.75}
+\textheight=9.75in
+\raggedbottom
+\hypersetup{colorlinks=true,linkbordercolor=blue,linkcolor=red,pdfborderstyle={/S/U/W 1}}
+
+\setlength{\tabcolsep}{0in}
+\newcommand{\isep}{-2 pt}
+\newcommand{\lsep}{-0.5cm}
+\newcommand{\psep}{-0.6cm}
+\renewcommand{\labelitemii}{$\circ$}
+
+\pagestyle{empty}
+%-----------------------------------------------------------
+%Custom commands
+\newcommand{\resitem}[1]{\item #1 \vspace{-2pt}}
+\newcommand{\resheading}[1]{{\small \colorbox{mygrey}{\begin{minipage}{0.975\textwidth}{\textbf{#1 \vphantom{p\^{E}}}}\end{minipage}}}}
+\newcommand{\ressubheading}[3]{
+\begin{tabular*}{6.62in}{l @{\extracolsep{\fill}} r}
+\textsc{{\textbf{#1}}} & \textsc{\textit{[#2]}} \\
+\end{tabular*}\vspace{-8pt}}
+%-----------------------------------------------------------
+
+\begin{document}
+\noindent
+\begin{minipage}[t]{0.5\textwidth}
+    \textbf{\Large Diganta Bhattacharya} \\[2pt]
+    Gokuldham, Goregaon East \\
+    Mumbai, Maharashtra, India - 400063 \\
+    Mobile No.: \textbf{8388954577}
+\end{minipage}%
+\hspace{0.05\textwidth}% Added horizontal space to shift the right minipage
+\begin{minipage}[t]{0.5\textwidth}
+    Email: \href{mailto:officialbhattacharya@gmail.com}{officialbhattacharya@gmail.com} \\[2pt]
+    Website: \href{https://officialbhattacharya.github.io/}{horizonSmirks} \\[2pt]
+    LinkedIn: \href{https://www.linkedin.com/in/diganta-bhattacharya-373293135/}{Diganta B} \\[2pt]
+    GitHub: \href{https://github.com/OfficialBhattacharya}{OfficialBhattacharya} \\[2pt]
+    Kaggle: \href{https://www.kaggle.com/digantabhattacharya}{senileFelines}
+\end{minipage}
+
+\resheading{\textbf{Academic Details} }\\[\lsep]
+\\
+\begin{center}
+\indent \begin{tabular}{ l @{\hskip 0.15in} l @{\hskip 0.15in} l @{\hskip 0.15in} l @{\hskip 0.15in} l }
+\hline
+\textbf{Examination} & \textbf{Institute} & \textbf{Year} & \textbf{\%} & \textbf{Specialization}\\
+\hline
+Masters of Statistics II Year \,\, & \textit{Indian Statistical Institute} & 2021-22 & 85.2 & \textit{Probability (Major)} \\
+Masters of Statistics I Year \,\, & \textit{Indian Statistical Institute} & 2020-21 & 80.4 &  \textit{Finance (Minor)}\\
+\hline
+\end{tabular}
+
+\end{center}
+
+\begin{center}
+\indent \begin{tabular}{ l @{\hskip 0.15in} l @{\hskip 0.15in} l @{\hskip 0.15in} l @{\hskip 0.15in} l }
+\hline
+\textbf{Examination} & \textbf{Institute} & \textbf{Year} & \textbf{\%}  \\
+\hline
+Bachelor of Statistics(Honours) III year \,\, & \textit{Indian Statistical Institute} & 2019-20 & 74.5   \\
+Bachelor of Statistics(Honours) II year \,\, & \textit{Indian Statistical Institute} & 2018-19 & 64.8*  \\
+Bachelor of Statistics(Honours) I year \,\, & \textit{Indian Statistical Institute} & 2017-18 & 74.6    \\
+Class XII (CBSE)  & \textit{D.P.S,Ruby Park} & 2017 & 93.2  \\
+\hline
+\end{tabular}
+
+\end{center}
+
+\resheading{\textbf{Projects} }\\[\lsep]
+\vspace{2mm}
+\begin{itemize}
+\item \textbf{Simulations Based on Voter Model.} \href{https://github.com/OfficialBhattacharya/Simulations-Based-on-Voter-Model/blob/main/VoterModelProject.pdf}{[Presentation]}; \href{https://github.com/OfficialBhattacharya/Simulations-Based-on-Voter-Model/blob/main/VoterModelProjectReport.pdf}{[Report]}\\
+\emph{(Guide: Prof. Soumendu Mukjherjee,  September'20- January'21)} \\[-0.6cm]
+\begin{itemize}
+    \item Studying the Basic Voter Model and its asymptotic behavior, verification with simulations for a complete graph, ran simulations for more than 2 opinions and reported results.
+\end{itemize}
+\item \textbf{Regression Techniques to Predict Salinity on CALCOFI oceanography data.} \href{https://github.com/OfficialBhattacharya/Regression-Techniques-to-Predict-Salinity-on-CALCOFI-oceanography-data/blob/main/KMD_project_presentation.pdf}{[Presentation]}; \href{https://github.com/OfficialBhattacharya/Regression-Techniques-to-Predict-Salinity-on-CALCOFI-oceanography-data/blob/main/Regression_Techniques_Project_Report__CALCOFI_Data_.pdf}{[Report]}
+ \\
+ \emph{(Guide: Prof. Kiranmoy Das
+, November'20 - December'20)} \\[-0.6cm]
+\begin{itemize}\itemsep \isep
+\item   Predicting salinity levels using several underwater measurements and emission level using Linear Models, Logistic Regression, GLM and some Non-Parametric models. 
+\end{itemize}
+
+\item \textbf{Obfuscating Continuous Data.} \href{https://github.com/OfficialBhattacharya/Obfuscating-Continuous-Data/blob/main/Obfuscating%20Continuous%20Data.pdf}{[Presentation]}
+ \\
+ \emph{(Guide: Prof. Bimal Roy
+, Aug'19 - Feb'20)} \\[-0.6cm]
+\begin{itemize}\itemsep \isep
+\item  Wrote an R code for implementation of the existing model and comparisons with other models, proposed 2 tweaks to the existent model to improved accuracy and lesser computational complexity.
+\end{itemize}
+
+\item \textbf{A modified approach for Map-Stitching and Shape Analysis.} \href{https://github.com/OfficialBhattacharya/Map-Stitching-and-Shape-Analysis/blob/main/MapStitchingProjectReport.pdf}{[Report 1]}; \href{https://github.com/OfficialBhattacharya/Map-Stitching-and-Shape-Analysis/blob/main/MapStitchingBasic.pdf}{[Report2]}; \href{https://github.com/OfficialBhattacharya/Map-Stitching-and-Shape-Analysis}{[Codes]}
+ \\
+ \emph{(Guide: Prof. Arnab Chakraborty
+, July'17 - August'19)} \\[-0.6cm]
+\begin{itemize}\itemsep \isep
+\item  Writing R codes for Image-Stitching, Shape Analysis  using linear models and an alternative geometric approach.
+\end{itemize}
+
+\item \textbf{CRT Blotter} \href{https://github.com/OfficialBhattacharya/Map-Stitching-and-Shape-Analysis/blob/main/MapStitchingProjectReport.pdf}{[Report 1]}; \href{https://github.com/OfficialBhattacharya/Map-Stitching-and-Shape-Analysis/blob/main/MapStitchingBasic.pdf}{[Report2]}; \href{https://github.com/OfficialBhattacharya/Map-Stitching-and-Shape-Analysis}{[Codes]}
+ \\
+ \emph{(Guide: Prof. Arnab Chakraborty
+, July'17 - August'19)} \\[-0.6cm]
+\begin{itemize}\itemsep \isep
+\item  Writing R codes for Image-Stitching, Shape Analysis  using linear models and an alternative geometric approach.
+\end{itemize}
+
+\item \textbf{Marksman Pricer} \href{https://github.com/OfficialBhattacharya/Map-Stitching-and-Shape-Analysis/blob/main/MapStitchingProjectReport.pdf}{[Report 1]}; \href{https://github.com/OfficialBhattacharya/Map-Stitching-and-Shape-Analysis/blob/main/MapStitchingBasic.pdf}{[Report2]}; \href{https://github.com/OfficialBhattacharya/Map-Stitching-and-Shape-Analysis}{[Codes]}
+ \\
+ \emph{(Guide: Prof. Arnab Chakraborty
+, July'17 - August'19)} \\[-0.6cm]
+\begin{itemize}\itemsep \isep
+\item  Writing R codes for Image-Stitching, Shape Analysis  using linear models and an alternative geometric approach.
+\end{itemize}
+\end{itemize}
+
+\vspace{2mm}
+
+\hrule
+\noindent
+ *  I had undergone surgery due to a sports injury and missed some exams in my second year.
+\newpage
+
+
+
+\resheading{\textbf{Personal Projects} }\\[\lsep]
+\begin{itemize}
+    \item \texttt{May 2021 - July 2021}\\
+    \textbf{Summer Associate} \textit{at} \textbf{FID, Morgan Stanley , Mumbai}  \\
+ \emph{Manager: Olgay Cangur, PhD, ED, FID Strats (NY), Morgan Stanley} \\[-0.6cm]
+\begin{itemize}\itemsep \isep
+\item Documentation and implementation of an existing ANN Model for House Price Prediction for American Homes in R and Python, with data collection and cleaning in kdb.
+for easier Model Implementations.
+    \end{itemize}
+    \item \texttt{May 2019 - July 2019,
+          May 2020 - July 2020}\\
+    \textbf{R C Bose Summer Internship in Cryptography} \textit{supported by} \textbf{Microsoft Research India, Bangalore}  \\
+ \emph{Guide: Dr. Goutam Paul, R C Bose Centre for Cryptology and Security, Indian Statistical Institute, Kolkata} \\[-0.6cm]
+\begin{itemize}\itemsep \isep
+\item Studied different aspects of the Hidden Subgroup Problem, the solved and the unsolved cases and prepared an algorithm for solved case.
+\item Studied a short proof of Fermat's Theorem, proposed an alternative proof. 
+\end{itemize}
+\end{itemize}
+
+\resheading{\textbf{Internships} }\\[\lsep]
+\begin{itemize}
+    \item \texttt{May 2021 - July 2021}\\
+    \textbf{Summer Associate} \textit{at} \textbf{FID, Morgan Stanley , Mumbai}  \\
+ \emph{Manager: Olgay Cangur, PhD, ED, FID Strats (NY), Morgan Stanley} \\[-0.6cm]
+\begin{itemize}\itemsep \isep
+\item Documentation and implementation of an existing ANN Model for House Price Prediction for American Homes in R and Python, with data collection and cleaning in kdb.
+\item Implementation of Basic Hedonic Pricing Model in R and a Basic Spatial Pricing Model in R to have comparisons with the original model and to have some interpretations.
+\item Creating a partial R-KDB framework to handle the ANN model FIP-wise, R modules for easier Model Implementations.
+    \end{itemize}
+    \item \texttt{May 2019 - July 2019,
+          May 2020 - July 2020}\\
+    \textbf{R C Bose Summer Internship in Cryptography} \textit{supported by} \textbf{Microsoft Research India, Bangalore}  \\
+ \emph{Guide: Dr. Goutam Paul, R C Bose Centre for Cryptology and Security, Indian Statistical Institute, Kolkata} \\[-0.6cm]
+\begin{itemize}\itemsep \isep
+\item Studied different aspects of the Hidden Subgroup Problem, the solved and the unsolved cases and prepared an algorithm for solved case.
+\item Studied a short proof of Fermat's Theorem, proposed an alternative proof. 
+\end{itemize}
+\end{itemize}
+
+
+% \resheading{\textbf{ONGOING PROJECT LINKS} }\\[\lsep]
+% \begin{itemize}
+% \item \noindent This \href{https://www.ncbi.nlm.nih.gov/pmc/articles/PMC4867863/}{project} is about new concentration bounds for clustering.
+% \item \noindent This \href{https://www.ncbi.nlm.nih.gov/pmc/articles/PMC4867863/}{project} introduces a new robust clustering scheme.
+% \end{itemize}
+
+\resheading{\textbf{Technical Skills} }\\[\lsep]
+\vspace{1mm}
+\begin{itemize}
+\item \noindent \textbf{Languages} :  R, Python, Q/kdb+ , SQL , Matlab , C.
+\item \noindent \textbf{Tools} : \LaTeX, R-Studio, MS Office (MS Excel, MS Word, MS PowerPoint), Geogebra, Desmos.
+\item \noindent \textbf{Other Skills} : GIT , PySpark , RShiny.
+\end{itemize}
+
+\resheading{\textbf{Awards \& Achievements} }\\[\lsep]
+\vspace{2mm}
+\begin{itemize}
+\item \noindent Qualified Regional Maths Olympiad(HBCSE) [2014],[2015],[2016].
+\item \noindent Qualified NTSE stage 1(NCERT), [2015] ; KVPY SA(IISc Bangalore), [2016].
+\item \noindent Qualified NEST Junior(NISER) AIR 67, [2014] ; NEST Senior(NISER) AIR 240, [2017].
+\item \noindent Came First in MTRP(ISI Kolkata), [2014] ; B.Stat(ISI) Merit List Rank 10, [2017].
+\item \noindent Top Quartile Asia (Pairs) in Asia Simon Marais Competition [2018],Third semester, Asia Rank- 27 (Pairs) in Asia Simon Marais Competition [2019].
+\item \noindent Qualified for RC Bose Microsoft India Internship for Cryptology [2019],[2020].
+\item \noindent Qualified for Octro Inc. Summer Internship for [2020] ; Novartis Summer Internship for [2021]; Morgan Stanley Summer Associate for [2021].
+\item \noindent Secured a Pre-Placement Offer for the Associate Position in Morgan Stanley, FID(Mumbai) [2022]. 
+\end{itemize}
+\hrule
+\newpage
+
+\resheading{\textbf{Certificates \& Collections} }\\[\lsep]
+\vspace{1mm}
+\begin{itemize}
+\item \textbf{Deep Learning A-Z™: Hands-On Artificial Neural Networks} on Udemy [2020].
+\item \textbf{Machine Learning A-Z™: Hands-On Python and R In Data Science} on Udemy [2020].
+\item \textbf{Machine Learning Practical Workout | 8 Real-World Projects} on Udemy [2020].
+\item \textbf{Cryptography 1 } 
+by Prof. Dan Boneh by \textbf{Stanford University} on Coursera [2019]. 
+\end{itemize}
+
+\resheading{\textbf{Fields of Interest} }\\[\lsep]
+\vspace{1mm}
+\begin{itemize}
+\item \noindent \textit{Academics-} Statistical Modelling , Neural Networks , Mean Field Games , Convex Optimization.
+\item \noindent \textit{Kaggle Competitions-} 
+     RSNA-MICCAI Brain Tumor Radiogenomic Classification ;
+     Optiver Realized Volatility Prediction ;
+     House Prices - Advanced Regression Techniques.
+\item \noindent \textit{Non-Credit Courses**-} Optimization Techniques , Bayesian Inference , Functional Data Analysis. 
+\end{itemize}
+
+\hrule
+
+\end{document}
+
