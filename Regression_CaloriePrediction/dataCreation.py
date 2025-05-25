@@ -101,6 +101,60 @@ class FeatureManager:
         print(f"  ✅ Created {created_features} polynomial features in {self._format_time(step_time)}")
         return df_processed    
 
+    def add_feature_logTerms(self, df: pd.DataFrame, features: List[str]) -> pd.DataFrame:
+        """Natural logarithm of each feature from specified columns"""
+        step_start = time.time()
+        print(f"  🔄 Creating log features from {len(features)} features...")
+        
+        df_processed = df.copy()
+        created_features = 0
+        
+        for feature in features:
+            # Add small epsilon to avoid log(0) and handle negative values
+            # Use log(abs(x) + 1e-8) to handle negative values and zeros
+            df_processed[f'{feature}_log'] = np.log(np.abs(df_processed[feature]) + 1e-8)
+            created_features += 1
+        
+        step_time = time.time() - step_start
+        print(f"  ✅ Created {created_features} logarithmic features in {self._format_time(step_time)}")
+        return df_processed
+
+    def add_feature_exponentialTerms(self, df: pd.DataFrame, features: List[str]) -> pd.DataFrame:
+        """Exponential (e^x) of each feature from specified columns"""
+        step_start = time.time()
+        print(f"  🔄 Creating exponential features from {len(features)} features...")
+        
+        df_processed = df.copy()
+        created_features = 0
+        
+        for feature in features:
+            # Clip values to prevent overflow (exp can grow very large)
+            # Limit to reasonable range to avoid numerical overflow
+            clipped_values = np.clip(df_processed[feature], -50, 50)
+            df_processed[f'{feature}_exp'] = np.exp(clipped_values)
+            created_features += 1
+        
+        step_time = time.time() - step_start
+        print(f"  ✅ Created {created_features} exponential features in {self._format_time(step_time)}")
+        return df_processed
+
+    def add_feature_sqrtTerms(self, df: pd.DataFrame, features: List[str]) -> pd.DataFrame:
+        """Square root of each feature from specified columns"""
+        step_start = time.time()
+        print(f"  🔄 Creating square root features from {len(features)} features...")
+        
+        df_processed = df.copy()
+        created_features = 0
+        
+        for feature in features:
+            # Use sqrt of absolute value to handle negative numbers
+            df_processed[f'{feature}_sqrt'] = np.sqrt(np.abs(df_processed[feature]))
+            created_features += 1
+        
+        step_time = time.time() - step_start
+        print(f"  ✅ Created {created_features} square root features in {self._format_time(step_time)}")
+        return df_processed
+
     def add_feature_subjectKnowledge(self, df: pd.DataFrame, columns_to_add: list[str]) -> pd.DataFrame:
         """
         Create subject knowledge features based on the provided list of column names.
@@ -949,14 +1003,16 @@ class FeatureManager:
                        outlierDetection_features: List[str] = None, outlier_score_method: str = 'z_score',
                        clustering_features: List[str] = None, n_clusters: int = 3,
                        pca_features: List[str] = None, n_components: int = 3,
-                       quantile_features: List[str] = None, n_quantiles: int = 4) -> Tuple[pd.DataFrame, pd.DataFrame]:
+                       quantile_features: List[str] = None, n_quantiles: int = 4,
+                       logTerm_features: List[str] = None, exponentialTerm_features: List[str] = None,
+                       sqrtTerm_features: List[str] = None) -> Tuple[pd.DataFrame, pd.DataFrame]:
         """
         Create features based on specified configuration
         
         Args:
             train_df: Training dataframe
             test_df: Test dataframe
-            feature_types: List of feature types to include (e.g., ['cross_terms', 'division_terms', 'square_cube', 'subject_knowledge', 'outlier_detection', 'clustering', 'pca', 'quantile_indicators'])
+            feature_types: List of feature types to include (e.g., ['cross_terms', 'division_terms', 'square_cube', 'subject_knowledge', 'outlier_detection', 'clustering', 'pca', 'quantile_indicators', 'log_terms', 'exponential_terms', 'sqrt_terms'])
             crossTerms_features: List of features for cross term multiplication
             divisionTerms_features: List of features for division terms
             squareCubeTerms_features: List of features for square and cube terms
@@ -969,6 +1025,9 @@ class FeatureManager:
             n_components: Number of principal components to extract (default: 3)
             quantile_features: List of features for quantile indicator creation
             n_quantiles: Number of quantiles to create (default: 4)
+            logTerm_features: List of features for log term creation
+            exponentialTerm_features: List of features for exponential term creation
+            sqrtTerm_features: List of features for square root term creation
             
         Returns:
             Tuple of processed training and test dataframes
@@ -987,19 +1046,12 @@ class FeatureManager:
         # Count total steps
         total_steps = 1  # Basic preprocessing
         if feature_types:
-            total_steps += len([ft for ft in feature_types if ft in ['cross_terms', 'division_terms', 'square_cube', 'subject_knowledge', 'outlier_detection', 'clustering', 'pca', 'quantile_indicators']])
+            total_steps += len([ft for ft in feature_types if ft in ['cross_terms', 'division_terms', 'square_cube', 'subject_knowledge', 'outlier_detection', 'clustering', 'pca', 'quantile_indicators', 'log_terms', 'exponential_terms', 'sqrt_terms']])
         
         current_step = 0
         
-        # Basic preprocessing step
-        self._log_progress("Basic preprocessing (Sex encoding)", current_step, total_steps, overall_start_time)
         preprocessing_start = time.time()
         
-        if 'Sex' in train_processed.columns:
-            train_processed['Sex'] = train_processed['Sex'].map({'male': 1, 'female': 0})
-        if 'Sex' in test_processed.columns:
-            test_processed['Sex'] = test_processed['Sex'].map({'male': 1, 'female': 0})
-            
         preprocessing_time = time.time() - preprocessing_start
         print(f"  ✅ Basic preprocessing completed in {self._format_time(preprocessing_time)}")
         current_step += 1
@@ -1113,6 +1165,42 @@ class FeatureManager:
             test_processed = self.add_feature_quantileIndicator(test_processed, quantile_features, n_quantiles)
             current_step += 1
         
+        if 'log_terms' in feature_types:
+            self._log_progress("Logarithmic features", current_step, total_steps, overall_start_time)
+            # Default to all numerical features if not specified
+            if logTerm_features is None:
+                logTerm_features = [col for col in train_processed.select_dtypes(include=['int64', 'float64']).columns 
+                                  if col not in ['Calories']]  # Exclude target if present
+            
+            print(f"    📝 Using features: {', '.join(logTerm_features)}")
+            train_processed = self.add_feature_logTerms(train_processed, logTerm_features)
+            test_processed = self.add_feature_logTerms(test_processed, logTerm_features)
+            current_step += 1
+        
+        if 'exponential_terms' in feature_types:
+            self._log_progress("Exponential features", current_step, total_steps, overall_start_time)
+            # Default to all numerical features if not specified
+            if exponentialTerm_features is None:
+                exponentialTerm_features = [col for col in train_processed.select_dtypes(include=['int64', 'float64']).columns 
+                                          if col not in ['Calories']]  # Exclude target if present
+            
+            print(f"    📝 Using features: {', '.join(exponentialTerm_features)}")
+            train_processed = self.add_feature_exponentialTerms(train_processed, exponentialTerm_features)
+            test_processed = self.add_feature_exponentialTerms(test_processed, exponentialTerm_features)
+            current_step += 1
+        
+        if 'sqrt_terms' in feature_types:
+            self._log_progress("Square root features", current_step, total_steps, overall_start_time)
+            # Default to all numerical features if not specified
+            if sqrtTerm_features is None:
+                sqrtTerm_features = [col for col in train_processed.select_dtypes(include=['int64', 'float64']).columns 
+                                   if col not in ['Calories']]  # Exclude target if present
+            
+            print(f"    📝 Using features: {', '.join(sqrtTerm_features)}")
+            train_processed = self.add_feature_sqrtTerms(train_processed, sqrtTerm_features)
+            test_processed = self.add_feature_sqrtTerms(test_processed, sqrtTerm_features)
+            current_step += 1
+        
         # Final summary
         total_time = time.time() - overall_start_time
         original_features = len(train_df.columns)
@@ -1190,7 +1278,10 @@ def process_features_with_config(
     pca_features: Optional[List[str]] = None,
     n_components: int = 3,
     quantile_features: Optional[List[str]] = None,
-    n_quantiles: int = 4
+    n_quantiles: int = 4,
+    logTerm_features: Optional[List[str]] = None,
+    exponentialTerm_features: Optional[List[str]] = None,
+    sqrtTerm_features: Optional[List[str]] = None
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
     """
     Process features based on provided configuration
@@ -1198,7 +1289,7 @@ def process_features_with_config(
     Args:
         train_df: Training dataframe
         test_df: Test dataframe
-        feature_types: List of feature types to include (e.g., ['cross_terms', 'division_terms', 'square_cube', 'subject_knowledge', 'outlier_detection', 'clustering', 'pca', 'quantile_indicators'])
+        feature_types: List of feature types to include (e.g., ['cross_terms', 'division_terms', 'square_cube', 'subject_knowledge', 'outlier_detection', 'clustering', 'pca', 'quantile_indicators', 'log_terms', 'exponential_terms', 'sqrt_terms'])
         crossTerms_features: List of features for cross term multiplication
         divisionTerms_features: List of features for division terms
         squareCubeTerms_features: List of features for square and cube terms
@@ -1211,6 +1302,9 @@ def process_features_with_config(
         n_components: Number of principal components to extract (default: 3)
         quantile_features: List of features for quantile indicator creation
         n_quantiles: Number of quantiles to create (default: 4)
+        logTerm_features: List of features for log term creation
+        exponentialTerm_features: List of features for exponential term creation
+        sqrtTerm_features: List of features for square root term creation
         
     Returns:
         Tuple of (processed_train_df, processed_test_df)
@@ -1224,7 +1318,7 @@ def process_features_with_config(
         train_df, test_df, feature_types, crossTerms_features, divisionTerms_features, 
         squareCubeTerms_features, subjectKnowledge_features, outlierDetection_features, outlier_score_method,
         clustering_features, n_clusters, pca_features, n_components,
-        quantile_features, n_quantiles
+        quantile_features, n_quantiles, logTerm_features, exponentialTerm_features, sqrtTerm_features
     )
     
     # Track the pipeline
@@ -1236,24 +1330,28 @@ def process_features_with_config(
     
     return train_processed, test_processed
 
-'''
-# Example usage with separate feature lists for each feature creation type
 
+
+'''
 # Define separate feature lists
-crossTerms_features = ['Age', 'Height', 'Weight', 'Body_Temp']
-divisionTerms_features = ['Age', 'Height', 'Weight', 'Duration', 'Body_Temp']
-squareCubeTerms_features = ['Age', 'Duration', 'Heart_Rate', 'Body_Temp']
+crossTerms_features = ['Age', 'Height', 'Weight', 'Duration', 'Heart_Rate', 'Body_Temp','Sex']
+divisionTerms_features = ['Age', 'Height', 'Weight', 'Duration', 'Heart_Rate', 'Body_Temp']
+squareCubeTerms_features = ['Age', 'Height', 'Weight', 'Duration', 'Heart_Rate', 'Body_Temp']
 subjectKnowledge_features = ['BMIscaled', 'BMR', 'Metabolic_Efficiency', 'Cardio_Stress', 'Thermic_Effect', 'Power_Output']
-outlierDetection_features = ['Age', 'Height', 'Weight', 'Heart_Rate', 'Duration']  
-clustering_features = ['Age', 'Height', 'Weight', 'Heart_Rate']  
-pca_features = ['Age', 'Height', 'Weight', 'Heart_Rate', 'Duration', 'Body_Temp']  
-quantile_features = ['Age', 'Height', 'Weight', 'Heart_Rate']  # Features for quantile indicators
+outlierDetection_features = ['Age', 'Height', 'Weight', 'Duration', 'Heart_Rate', 'Body_Temp']
+clustering_features = ['Age', 'Height', 'Weight', 'Duration', 'Heart_Rate', 'Body_Temp']
+pca_features = ['Age', 'Height', 'Weight', 'Duration', 'Heart_Rate', 'Body_Temp']
+quantile_features = ['Age', 'Height', 'Weight', 'Duration', 'Heart_Rate', 'Body_Temp']
+logTerm_features = ['Age', 'Height', 'Weight', 'Duration', 'Heart_Rate', 'Body_Temp']
+exponentialTerm_features = ['Age', 'Height', 'Weight', 'Duration', 'Heart_Rate', 'Body_Temp']
+sqrtTerm_features = ['Age', 'Height', 'Weight', 'Duration', 'Heart_Rate', 'Body_Temp']
+
 
 # Simple usage with FeatureManager
 feature_manager = FeatureManager()
 train_processed, test_processed = feature_manager.create_features(
-    train, test, 
-    feature_types=['cross_terms', 'division_terms', 'square_cube', 'subject_knowledge', 'outlier_detection', 'clustering', 'pca', 'quantile_indicators'],
+    train.sample(frac=0.01), test.sample(frac=0.01), 
+    feature_types=['cross_terms', 'division_terms', 'square_cube', 'subject_knowledge', 'outlier_detection', 'clustering', 'pca', 'quantile_indicators', 'log_terms', 'exponential_terms', 'sqrt_terms'],
     crossTerms_features=crossTerms_features,
     divisionTerms_features=divisionTerms_features,
     squareCubeTerms_features=squareCubeTerms_features,
@@ -1261,10 +1359,13 @@ train_processed, test_processed = feature_manager.create_features(
     outlierDetection_features=outlierDetection_features,
     outlier_score_method='z_score',
     clustering_features=clustering_features,
-    n_clusters=4,  # Custom number of clusters
+    n_clusters=10,  # Custom number of clusters
     pca_features=pca_features,
-    n_components=5,  # Extract 5 principal components
+    n_components=2,  # Extract 2 principal components
     quantile_features=quantile_features,
-    n_quantiles=5  # Create quintiles (5 quantiles)
+    n_quantiles=10,  # Create deciles (10 quantiles)
+    logTerm_features=logTerm_features,
+    exponentialTerm_features=exponentialTerm_features,
+    sqrtTerm_features=sqrtTerm_features
 )
 '''
