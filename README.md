@@ -1,4 +1,4 @@
-# Kaggle Notebooks Collection (2025)
+# Kaggle Notebooks Collection
 
 This repository contains a collection of Kaggle notebooks from 2025 focused on data analysis and machine learning projects.
 
