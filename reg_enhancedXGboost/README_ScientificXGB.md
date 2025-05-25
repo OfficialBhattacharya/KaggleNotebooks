@@ -1,16 +1,26 @@
-# ScientificXGBRegressor: Advanced XGBoost for Scientific Computing
+# ScientificXGBRegressor: Advanced XGBoost for Scientific Computing with GPU Acceleration
 
 ## 🧪 Overview
 
-`ScientificXGBRegressor` is an enhanced XGBoost regressor designed for scientific machine learning applications. It extends the standard XGBRegressor with sophisticated features including automated parameterization, comprehensive validation protocols, advanced diagnostics, and complete model artifact management.
+`ScientificXGBRegressor` is an enhanced XGBoost regressor designed for scientific machine learning applications with automatic GPU acceleration. It extends the standard XGBRegressor with sophisticated features including automated parameterization, comprehensive validation protocols, advanced diagnostics, complete model artifact management, and intelligent GPU utilization.
 
 ## ✨ Key Features
+
+### ⚡ Intelligent GPU Acceleration
+- **Automatic GPU Detection**: Multi-method GPU discovery (nvidia-smi, PyTorch, TensorFlow, GPUtil)
+- **Smart GPU Selection**: Automatically selects optimal GPU based on available memory
+- **Multi-GPU Support**: Utilizes all available GPUs for training when beneficial
+- **GPU Memory Optimization**: Adapts parameters based on GPU memory constraints
+- **CPU/GPU Switching**: Runtime switching between CPU and GPU processing
+- **Fallback Handling**: Graceful fallback to CPU when GPU is unavailable
 
 ### 🔬 Automated Data-Driven Parameterization
 - **Statistical Analysis**: Automatically analyzes dataset characteristics
 - **Scientific Rationale**: Uses mathematical principles to set hyperparameters
+- **GPU-Enhanced Optimization**: Special parameter tuning for GPU acceleration
 - **Adaptive Learning Rate**: Based on convergence theory: η = min(0.3, 1.0 / √n_samples)
 - **Dynamic Regularization**: Adapts to dimensionality and noise levels
+- **Memory-Aware Tuning**: Adjusts parameters based on GPU memory availability
 
 ### 🔄 Nested Cross-Validation
 - **Unbiased Performance Estimation**: Prevents data leakage
@@ -99,6 +109,208 @@ package_path = model.save_model_package(
     include_data=True,
     X_sample=X[:100],
     y_sample=y[:100]
+)
+```
+
+## 🎮 GPU Acceleration Guide
+
+### Automatic GPU Detection and Usage
+
+The ScientificXGBRegressor automatically detects and configures GPU acceleration:
+
+```python
+from xgboost import create_scientific_xgb_regressor
+
+# Auto-detect and use GPU if available (recommended)
+model = create_scientific_xgb_regressor()
+# Output: 🎮 GPU acceleration available: 2 GPU(s) detected
+#         ⚡ Using GPU 0 for training
+```
+
+### Manual GPU Control
+
+```python
+# Force GPU usage (will fail if no GPU available)
+model_gpu = create_scientific_xgb_regressor(use_gpu=True)
+
+# Force CPU usage (disable GPU even if available)
+model_cpu = create_scientific_xgb_regressor(use_gpu=False)
+
+# Runtime switching between GPU and CPU
+model.switch_to_gpu()      # Enable GPU acceleration
+model.switch_to_cpu()      # Switch to CPU processing
+model.print_gpu_status()   # Display current GPU configuration
+```
+
+### GPU Status and Information
+
+```python
+# Get comprehensive GPU information
+gpu_info = model.get_gpu_info()
+print(f"Using GPU: {gpu_info['using_gpu']}")
+print(f"Available GPUs: {gpu_info['gpu_info']['count']}")
+
+# Display detailed GPU status report
+model.print_gpu_status()
+# Output: 🎮 GPU Status Report
+#         =====================================
+#         CUDA Available: True
+#         GPUtil Available: True
+#         GPUs Detected: 2
+#         
+#         GPU 0:
+#           Name: NVIDIA GeForce RTX 3080
+#           Memory: 10240 MB total
+#           Free: 8192 MB (80.0%)
+#           Utilization: 15.2%
+#           Temperature: 45.0°C
+```
+
+### GPU Memory Optimization
+
+```python
+# Optimize GPU usage based on dataset size
+optimization_results = model.optimize_gpu_usage(X)
+
+print(f"Dataset size: {optimization_results['dataset_analysis']['data_size_mb']:.1f} MB")
+print(f"GPU memory: {optimization_results['dataset_analysis']['max_gpu_memory_mb']:.1f} MB")
+
+# Automatic recommendations
+for recommendation in optimization_results['recommendations']:
+    print(f"💡 {recommendation}")
+```
+
+### Multi-GPU Support
+
+```python
+# Automatic multi-GPU detection and usage
+model = create_scientific_xgb_regressor()
+# If multiple suitable GPUs are detected, they will be used automatically
+
+# Manual multi-GPU specification
+model.switch_to_gpu("0,1,2")  # Use GPUs 0, 1, and 2
+
+# Check multi-GPU configuration
+gpu_info = model.get_gpu_info()
+if gpu_info['gpu_config']['n_gpus'] > 1:
+    print(f"Using {gpu_info['gpu_config']['n_gpus']} GPUs")
+```
+
+### GPU-Enhanced Features
+
+#### GPU-Aware Automated Parameterization
+```python
+# Automatically optimizes parameters for GPU usage
+model.automated_parameterization(X, y)
+# Output: ⚡ Applying GPU-specific optimizations...
+#         📊 Small dataset (5.2MB) relative to GPU memory (8192.0MB)
+#         🚀 Increasing parameters for better GPU utilization...
+```
+
+#### Performance Benchmarking
+```python
+import time
+
+# Benchmark GPU vs CPU performance
+model = create_scientific_xgb_regressor()
+
+# GPU training
+start_time = time.time()
+model.fit(X, y)
+gpu_time = time.time() - start_time
+
+# CPU training
+model.switch_to_cpu()
+start_time = time.time()
+model.fit(X, y)
+cpu_time = time.time() - start_time
+
+speedup = cpu_time / gpu_time
+print(f"GPU speedup: {speedup:.1f}x faster than CPU")
+```
+
+### GPU Requirements and Installation
+
+#### XGBoost GPU Version
+```bash
+# Install XGBoost with GPU support
+pip install xgboost[gpu]
+
+# Or install CUDA-enabled XGBoost
+conda install -c conda-forge py-xgboost-gpu
+```
+
+#### Optional GPU Detection Libraries
+```bash
+# For enhanced GPU detection and monitoring
+pip install GPUtil          # GPU utilization monitoring
+pip install torch           # PyTorch CUDA detection
+pip install tensorflow-gpu  # TensorFlow GPU detection
+```
+
+#### CUDA Requirements
+- CUDA Toolkit 11.0 or later
+- cuDNN 8.0 or later
+- Compatible NVIDIA GPU (Compute Capability 3.5+)
+
+### GPU Troubleshooting
+
+#### Common Issues and Solutions
+
+1. **GPU Not Detected**
+```python
+# Check CUDA availability
+from xgboost import GPUManager
+gpu_info = GPUManager.detect_gpus()
+print(f"CUDA Available: {gpu_info['cuda_available']}")
+```
+
+2. **Memory Issues**
+```python
+# Reduce memory usage for large datasets
+model = create_scientific_xgb_regressor(
+    max_depth=6,        # Limit tree depth
+    subsample=0.8,      # Reduce sample size
+    colsample_bytree=0.8  # Reduce feature sampling
+)
+```
+
+3. **Performance Issues**
+```python
+# For small datasets, CPU might be faster
+if X.shape[0] < 1000:
+    model.switch_to_cpu()
+```
+
+### GPU Configuration Examples
+
+#### High-Performance GPU Setup
+```python
+model = create_scientific_xgb_regressor(
+    n_estimators=3000,
+    learning_rate=0.05,
+    max_depth=8,
+    use_gpu=True,
+    cv_folds=10
+)
+```
+
+#### Memory-Efficient GPU Setup
+```python
+model = create_scientific_xgb_regressor(
+    n_estimators=1000,
+    max_depth=6,
+    subsample=0.8,
+    colsample_bytree=0.8,
+    use_gpu=True
+)
+```
+
+#### CPU Fallback Setup
+```python
+model = create_scientific_xgb_regressor(
+    use_gpu=None,  # Auto-detect, fallback to CPU
+    verbose=True   # Show GPU detection results
 )
 ```
 

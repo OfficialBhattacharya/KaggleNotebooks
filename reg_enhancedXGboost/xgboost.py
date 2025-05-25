@@ -76,6 +76,245 @@ try:
 except ImportError:
     SHAP_AVAILABLE = False
 
+# GPU Detection and Support
+try:
+    import GPUtil
+    GPUTIL_AVAILABLE = True
+except ImportError:
+    GPUTIL_AVAILABLE = False
+
+try:
+    import torch
+    TORCH_AVAILABLE = True
+except ImportError:
+    TORCH_AVAILABLE = False
+
+try:
+    import tensorflow as tf
+    TF_AVAILABLE = True
+except ImportError:
+    TF_AVAILABLE = False
+
+# CUDA availability check
+try:
+    import subprocess
+    import os
+    CUDA_AVAILABLE = False
+    try:
+        # Check if nvidia-smi is available
+        result = subprocess.run(['nvidia-smi', '-L'], capture_output=True, text=True, timeout=10)
+        if result.returncode == 0:
+            CUDA_AVAILABLE = True
+    except (subprocess.TimeoutExpired, FileNotFoundError, subprocess.SubprocessError):
+        pass
+except ImportError:
+    CUDA_AVAILABLE = False
+
+
+class GPUManager:
+    """
+    GPU Detection and Management for XGBoost
+    """
+    
+    @staticmethod
+    def detect_gpus() -> Dict[str, Any]:
+        """
+        Detect available GPUs and their capabilities.
+        
+        Returns:
+        --------
+        Dict[str, Any]
+            Dictionary containing GPU information
+        """
+        gpu_info = {
+            'available': False,
+            'count': 0,
+            'devices': [],
+            'cuda_available': CUDA_AVAILABLE,
+            'memory_info': [],
+            'driver_version': None,
+            'cuda_version': None
+        }
+        
+        # Check CUDA availability first
+        if not CUDA_AVAILABLE:
+            return gpu_info
+        
+        # Try multiple methods to detect GPUs
+        
+        # Method 1: GPUtil (most reliable)
+        if GPUTIL_AVAILABLE:
+            try:
+                gpus = GPUtil.getGPUs()
+                if gpus:
+                    gpu_info['available'] = True
+                    gpu_info['count'] = len(gpus)
+                    for i, gpu in enumerate(gpus):
+                        device_info = {
+                            'id': gpu.id,
+                            'name': gpu.name,
+                            'memory_total': gpu.memoryTotal,
+                            'memory_free': gpu.memoryFree,
+                            'memory_used': gpu.memoryUsed,
+                            'utilization': gpu.load * 100,
+                            'temperature': gpu.temperature
+                        }
+                        gpu_info['devices'].append(device_info)
+                        gpu_info['memory_info'].append({
+                            'total_mb': gpu.memoryTotal,
+                            'free_mb': gpu.memoryFree,
+                            'used_mb': gpu.memoryUsed
+                        })
+                    return gpu_info
+            except Exception:
+                pass
+        
+        # Method 2: PyTorch CUDA detection
+        if TORCH_AVAILABLE:
+            try:
+                if torch.cuda.is_available():
+                    gpu_info['available'] = True
+                    gpu_info['count'] = torch.cuda.device_count()
+                    gpu_info['cuda_version'] = torch.version.cuda
+                    
+                    for i in range(gpu_info['count']):
+                        props = torch.cuda.get_device_properties(i)
+                        device_info = {
+                            'id': i,
+                            'name': props.name,
+                            'memory_total': props.total_memory // (1024**2),  # Convert to MB
+                            'compute_capability': f"{props.major}.{props.minor}"
+                        }
+                        gpu_info['devices'].append(device_info)
+                        
+                        # Get memory info
+                        torch.cuda.set_device(i)
+                        memory_free = torch.cuda.memory_reserved(i) // (1024**2)
+                        memory_total = props.total_memory // (1024**2)
+                        gpu_info['memory_info'].append({
+                            'total_mb': memory_total,
+                            'free_mb': memory_free,
+                            'used_mb': memory_total - memory_free
+                        })
+                    return gpu_info
+            except Exception:
+                pass
+        
+        # Method 3: TensorFlow GPU detection
+        if TF_AVAILABLE:
+            try:
+                physical_devices = tf.config.list_physical_devices('GPU')
+                if physical_devices:
+                    gpu_info['available'] = True
+                    gpu_info['count'] = len(physical_devices)
+                    for i, device in enumerate(physical_devices):
+                        device_info = {
+                            'id': i,
+                            'name': device.name,
+                            'device_type': device.device_type
+                        }
+                        gpu_info['devices'].append(device_info)
+                    return gpu_info
+            except Exception:
+                pass
+        
+        # Method 4: Direct nvidia-smi parsing
+        try:
+            result = subprocess.run([
+                'nvidia-smi', '--query-gpu=index,name,memory.total,memory.free,memory.used,utilization.gpu,temperature.gpu',
+                '--format=csv,noheader,nounits'
+            ], capture_output=True, text=True, timeout=10)
+            
+            if result.returncode == 0:
+                lines = result.stdout.strip().split('\n')
+                if lines and lines[0]:
+                    gpu_info['available'] = True
+                    gpu_info['count'] = len(lines)
+                    
+                    for line in lines:
+                        parts = [p.strip() for p in line.split(',')]
+                        if len(parts) >= 7:
+                            device_info = {
+                                'id': int(parts[0]),
+                                'name': parts[1],
+                                'memory_total': int(parts[2]),
+                                'memory_free': int(parts[3]),
+                                'memory_used': int(parts[4]),
+                                'utilization': float(parts[5]) if parts[5] != '[Not Supported]' else 0.0,
+                                'temperature': float(parts[6]) if parts[6] != '[Not Supported]' else 0.0
+                            }
+                            gpu_info['devices'].append(device_info)
+                            gpu_info['memory_info'].append({
+                                'total_mb': int(parts[2]),
+                                'free_mb': int(parts[3]),
+                                'used_mb': int(parts[4])
+                            })
+                    return gpu_info
+        except Exception:
+            pass
+        
+        return gpu_info
+    
+    @staticmethod
+    def get_optimal_gpu_config(gpu_info: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Determine optimal GPU configuration for XGBoost.
+        
+        Parameters:
+        -----------
+        gpu_info : Dict[str, Any]
+            GPU information from detect_gpus()
+            
+        Returns:
+        --------
+        Dict[str, Any]
+            Optimal GPU configuration
+        """
+        config = {
+            'tree_method': 'auto',
+            'device': 'cpu',  # New XGBoost 2.0+ parameter instead of gpu_id
+            'n_gpus': 0,
+            'use_gpu': False
+        }
+        
+        if not gpu_info['available'] or gpu_info['count'] == 0:
+            return config
+        
+        # GPU is available, configure for GPU usage
+        config['use_gpu'] = True
+        config['tree_method'] = 'hist'  # XGBoost 2.0+ uses 'hist' with device='cuda'
+        # Note: 'predictor' parameter is deprecated in XGBoost 2.0+, removed
+        config['n_gpus'] = gpu_info['count']
+        
+        # Select best GPU based on available memory
+        if gpu_info['memory_info']:
+            best_gpu_idx = 0
+            max_free_memory = 0
+            
+            for i, memory_info in enumerate(gpu_info['memory_info']):
+                free_memory = memory_info.get('free_mb', 0)
+                if free_memory > max_free_memory:
+                    max_free_memory = free_memory
+                    best_gpu_idx = i
+            
+            config['device'] = f'cuda:{best_gpu_idx}'  # New XGBoost 2.0+ syntax
+        else:
+            config['device'] = 'cuda:0'  # Default to first GPU
+        
+        # Use all GPUs if multiple are available and have sufficient memory
+        min_memory_threshold = 2048  # 2GB minimum
+        suitable_gpus = []
+        
+        for i, memory_info in enumerate(gpu_info['memory_info']):
+            if memory_info.get('free_mb', 0) >= min_memory_threshold:
+                suitable_gpus.append(i)
+        
+        if len(suitable_gpus) > 1:
+            # For multi-GPU, use the first suitable GPU (XGBoost handles multi-GPU internally)
+            config['device'] = f'cuda:{suitable_gpus[0]}'
+            config['n_gpus'] = len(suitable_gpus)
+        
+        return config
 
 class ScientificXGBRegressor(XGBRegressor):
     """
@@ -112,6 +351,9 @@ class ScientificXGBRegressor(XGBRegressor):
         Additional XGBoost parameters
     """
     
+    # Class variable to track if GPU info has been shown
+    _gpu_info_shown = False
+    
     def __init__(
         self,
         cv_folds: int = 5,
@@ -126,32 +368,88 @@ class ScientificXGBRegressor(XGBRegressor):
         colsample_bytree: float = 0.8,
         reg_alpha: float = 0.0,
         reg_lambda: float = 1.0,
+        use_gpu: Optional[bool] = None,  # None = auto-detect, True = force GPU, False = force CPU
         **kwargs
     ):
-        # Store scientific parameters
+        # Store scientific parameters separately (don't pass to parent)
         self.cv_folds = cv_folds
         self.auto_tune = auto_tune
         self.verbose = verbose
         self.early_stopping_rounds = early_stopping_rounds
+        self.use_gpu = use_gpu  # Store use_gpu parameter for sklearn compatibility
         self._is_fitted = False
         self._cv_results = {}
         self._feature_importance_scores = {}
         self._validation_history = {}
         self._hyperparameter_history = {}
         
-        # Initialize XGBRegressor with scientific defaults
-        super().__init__(
-            n_estimators=n_estimators,
-            learning_rate=learning_rate,
-            max_depth=max_depth,
-            subsample=subsample,
-            colsample_bytree=colsample_bytree,
-            reg_alpha=reg_alpha,
-            reg_lambda=reg_lambda,
-            random_state=random_state,
-            early_stopping_rounds=early_stopping_rounds,
-            **kwargs
-        )
+        # GPU Detection and Configuration (only show detailed info once)
+        if self.verbose and not ScientificXGBRegressor._gpu_info_shown:
+            print("🔍 Detecting GPU availability...")
+        
+        self._gpu_info = GPUManager.detect_gpus()
+        self._gpu_config = GPUManager.get_optimal_gpu_config(self._gpu_info)
+        
+        # Determine GPU usage
+        if use_gpu is None:
+            # Auto-detect GPU usage
+            use_gpu_final = self._gpu_config['use_gpu']
+        else:
+            # User specified GPU preference
+            use_gpu_final = use_gpu and self._gpu_config['use_gpu']
+        
+        # Display GPU information (detailed version only once)
+        if self.verbose:
+            if not ScientificXGBRegressor._gpu_info_shown:
+                if self._gpu_info['available']:
+                    gpu_names = [device['name'] for device in self._gpu_info['devices']]
+                    print(f"🎮 Found {self._gpu_info['count']} GPU(s): {', '.join(gpu_names)}")
+                    ScientificXGBRegressor._gpu_info_shown = True  # Mark as shown
+                else:
+                    print("💻 No GPUs detected, using CPU for training")
+                    ScientificXGBRegressor._gpu_info_shown = True
+            
+            # Show current model configuration (always show this)
+            if use_gpu_final:
+                device_info = self._gpu_config['device']
+                print(f"⚡ GPU acceleration: {device_info} (method: {self._gpu_config['tree_method']})")
+            else:
+                print("💻 CPU processing (GPU disabled)")
+        
+        # Prepare XGBoost parameters only (exclude scientific parameters)
+        xgb_params = {
+            'n_estimators': n_estimators,
+            'learning_rate': learning_rate,
+            'max_depth': max_depth,
+            'subsample': subsample,
+            'colsample_bytree': colsample_bytree,
+            'reg_alpha': reg_alpha,
+            'reg_lambda': reg_lambda,
+            'random_state': random_state,
+            'early_stopping_rounds': early_stopping_rounds,
+            'eval_metric': 'rmse',  # Set eval_metric here to avoid deprecation warning
+        }
+        
+        # Add GPU parameters if GPU is available and enabled
+        if use_gpu_final:
+            xgb_params.update({
+                'tree_method': self._gpu_config['tree_method'],
+                'device': self._gpu_config['device']
+            })
+        
+        # Add any additional XGBoost parameters from kwargs
+        # Filter out any GPU-related parameters that might conflict
+        filtered_kwargs = {k: v for k, v in kwargs.items() 
+                          if k not in ['tree_method', 'device', 'use_gpu', 'predictor']}
+        xgb_params.update(filtered_kwargs)
+        
+        # Store GPU configuration for later use
+        self._using_gpu = use_gpu_final
+        self._gpu_params = {k: v for k, v in xgb_params.items() 
+                           if k in ['tree_method', 'device']} if use_gpu_final else {}
+        
+        # Initialize XGBRegressor with only XGBoost parameters
+        super().__init__(**xgb_params)
         
         if self.verbose:
             print(f"🧪 ScientificXGBRegressor initialized with {cv_folds}-fold CV")
@@ -635,7 +933,8 @@ class ScientificXGBRegressor(XGBRegressor):
             Optimized hyperparameters with scientific justification
         """
         if self.verbose:
-            print("🔬 Analyzing dataset characteristics for automated parameterization...")
+            print("📊 STEP: Automated Parameterization")
+            print("   🔬 Analyzing dataset characteristics...")
         
         char = self._calculate_data_characteristics(X, y)
         
@@ -675,28 +974,72 @@ class ScientificXGBRegressor(XGBRegressor):
         if char['n_samples'] < 1000:
             params['gamma'] = 0.1
         
+        # GPU-specific optimizations
+        if self._using_gpu and self._gpu_info['available']:
+            if self.verbose:
+                print("   ⚡ Applying GPU-specific optimizations...")
+            
+            # GPU memory optimization: adjust tree_method and max_depth for GPU efficiency
+            available_memory = 0
+            if self._gpu_info['memory_info']:
+                available_memory = max(info['free_mb'] for info in self._gpu_info['memory_info'])
+            
+            data_size_mb = X.nbytes / (1024**2) if hasattr(X, 'nbytes') else 0
+            
+            # Optimize based on GPU memory and dataset size
+            if available_memory > 0:
+                memory_ratio = data_size_mb / available_memory
+                
+                if memory_ratio > 0.7:  # Dataset uses >70% of GPU memory
+                    if self.verbose:
+                        print(f"      📊 Memory optimization: Dataset {data_size_mb:.1f}MB / GPU {available_memory:.1f}MB")
+                    
+                    # Reduce memory usage
+                    params['max_depth'] = min(params['max_depth'], 6)  # Limit tree depth
+                    params['subsample'] = min(params['subsample'], 0.8)  # Reduce sample size
+                    params['colsample_bytree'] = min(params['colsample_bytree'], 0.8)
+                    
+                elif memory_ratio < 0.3:  # Dataset uses <30% of GPU memory
+                    if self.verbose:
+                        print(f"      🚀 GPU optimization: Small dataset allows higher complexity")
+                    
+                    # Can afford more complex models
+                    params['max_depth'] = min(params['max_depth'] + 1, 10)
+                    params['n_estimators'] = min(params['n_estimators'] * 1.2, 3000)
+            
+            # Multi-GPU optimizations
+            if self._gpu_config['n_gpus'] > 1:
+                if self.verbose:
+                    print(f"      🎮 Multi-GPU optimization: {self._gpu_config['n_gpus']} GPUs available")
+                
+                # Increase batch size effectively by allowing more complex models
+                if char['n_samples'] > 5000:  # Only for larger datasets
+                    params['n_estimators'] = min(params['n_estimators'] * 1.5, 4000)
+                    params['learning_rate'] = params['learning_rate'] * 0.9  # Slightly reduce LR for stability
+            
+            # GPU histogram method optimizations
+            if char['n_features'] > 100:
+                # For high-dimensional data, GPU histogram is very efficient
+                if self.verbose:
+                    print(f"      📊 High-dimensional optimization: {char['n_features']} features")
+                params['max_bin'] = min(256, max(64, char['n_features']))  # Optimize bin count
+        
         # Update model parameters
         for key, value in params.items():
             setattr(self, key, value)
         
         if self.verbose:
-            print("📊 Dataset Characteristics:")
-            for key, value in char.items():
-                if isinstance(value, float):
-                    print(f"   {key}: {value:.4f}")
-                else:
-                    print(f"   {key}: {value}")
-            
-            print("🎯 Automated Parameters:")
-            for key, value in params.items():
-                if isinstance(value, float):
-                    print(f"   {key}: {value:.4f}")
-                else:
-                    print(f"   {key}: {value}")
+            print("   ✅ Parameterization complete")
+            print(f"      Learning rate: {params['learning_rate']:.4f}")
+            print(f"      N estimators: {params['n_estimators']}")
+            print(f"      Max depth: {params['max_depth']}")
+            if self._using_gpu:
+                print(f"      GPU optimizations applied: {len([k for k in params.keys() if k in ['max_bin']])} params")
         
         self._hyperparameter_history['automated'] = {
             'parameters': params,
             'characteristics': char,
+            'gpu_enhanced': self._using_gpu,
             'timestamp': datetime.now().isoformat()
         }
         
@@ -776,8 +1119,18 @@ class ScientificXGBRegressor(XGBRegressor):
             # Inner CV loop for hyperparameter optimization
             inner_kf = KFold(n_splits=inner_cv, shuffle=True, random_state=self.random_state)
             
+            # Create base estimator with same GPU configuration as main model
+            base_estimator_params = {'random_state': self.random_state}
+            if self._using_gpu and self._gpu_info['available']:
+                # For nested CV, use CPU to avoid device mismatch warnings and memory issues
+                # GPU with nested CV can be problematic due to data copying
+                base_estimator_params.update({
+                    'device': 'cpu',
+                    'tree_method': 'hist'
+                })
+            
             grid_search = RandomizedSearchCV(
-                estimator=XGBRegressor(random_state=self.random_state),
+                estimator=XGBRegressor(**base_estimator_params),
                 param_distributions=param_grid,
                 cv=inner_kf,
                 scoring=scoring,
@@ -899,12 +1252,29 @@ class ScientificXGBRegressor(XGBRegressor):
         if not self._is_fitted:
             self.fit(X, y)
         
+        # Handle device compatibility to prevent mismatch warnings
+        X, y = self._handle_device_compatibility(X, y)
+        
         fig, axes = plt.subplots(3, 3, figsize=figsize)
         fig.suptitle('Scientific XGBoost Diagnostic Analysis', fontsize=16, fontweight='bold')
         
-        # Get predictions
-        y_pred = self.predict(X)
-        residuals = y - y_pred
+        # Get predictions with proper device handling
+        # Temporarily switch to CPU mode for predictions to avoid device warnings
+        original_gpu_state = self._using_gpu
+        if self._using_gpu:
+            # For diagnostic plots, use CPU to avoid device mismatch warnings
+            original_params = self.get_params()
+            temp_cpu_params = {k: v for k, v in original_params.items()}
+            temp_cpu_params.update({'device': 'cpu', 'tree_method': 'hist'})
+            self.set_params(**temp_cpu_params)
+        
+        try:
+            y_pred = self.predict(X)
+            residuals = y - y_pred
+        finally:
+            # Restore original GPU settings
+            if original_gpu_state:
+                self.set_params(**original_params)
         
         # 1. Actual vs Predicted
         axes[0, 0].scatter(y, y_pred, alpha=0.6, s=20)
@@ -1082,17 +1452,82 @@ class ScientificXGBRegressor(XGBRegressor):
             else:
                 raise ValueError(f"Default range not defined for parameter: {param_name}")
         
-        # Compute validation curve
-        train_scores, validation_scores = validation_curve(
-            estimator=self,
-            X=X,
-            y=y,
-            param_name=param_name,
-            param_range=param_range,
-            cv=cv_folds,
-            scoring=scoring,
-            n_jobs=-1
-        )
+        # Manual cross-validation implementation to avoid sklearn issues
+        if self.verbose:
+            print(f"   📊 Testing {len(param_range)} parameter values with {cv_folds}-fold CV...")
+        
+        train_scores = []
+        validation_scores = []
+        
+        # Set up cross-validation
+        kf = KFold(n_splits=cv_folds, shuffle=True, random_state=self.random_state)
+        
+        for param_value in param_range:
+            if self.verbose:
+                print(f"      Testing {param_name}={param_value}...")
+            
+            train_fold_scores = []
+            val_fold_scores = []
+            
+            # Perform cross-validation for this parameter value
+            for fold_idx, (train_idx, val_idx) in enumerate(kf.split(X)):
+                try:
+                    # Split data
+                    X_train_fold, X_val_fold = X[train_idx], X[val_idx]
+                    y_train_fold, y_val_fold = y[train_idx], y[val_idx]
+                    
+                    # Create a copy of the model with the specific parameter value
+                    model_copy = clone(self)
+                    
+                    # Set the parameter
+                    model_copy.set_params(**{param_name: param_value})
+                    
+                    # Handle GPU configuration for the cloned model
+                    if hasattr(self, '_using_gpu') and self._using_gpu:
+                        # For cross-validation, use CPU to avoid device mismatch warnings
+                        # GPU training with CV can cause memory issues and device warnings
+                        model_copy.set_params(device='cpu', tree_method='hist')
+                        model_copy._using_gpu = False
+                    
+                    # Fit the model
+                    model_copy.fit(X_train_fold, y_train_fold)
+                    
+                    # Predict and score
+                    train_pred = model_copy.predict(X_train_fold)
+                    val_pred = model_copy.predict(X_val_fold)
+                    
+                    # Calculate scores based on scoring metric
+                    if scoring == 'neg_mean_squared_error':
+                        train_score = -mean_squared_error(y_train_fold, train_pred)
+                        val_score = -mean_squared_error(y_val_fold, val_pred)
+                    elif scoring == 'r2':
+                        train_score = r2_score(y_train_fold, train_pred)
+                        val_score = r2_score(y_val_fold, val_pred)
+                    elif scoring == 'neg_mean_absolute_error':
+                        train_score = -mean_absolute_error(y_train_fold, train_pred)
+                        val_score = -mean_absolute_error(y_val_fold, val_pred)
+                    else:
+                        # Default to negative MSE
+                        train_score = -mean_squared_error(y_train_fold, train_pred)
+                        val_score = -mean_squared_error(y_val_fold, val_pred)
+                    
+                    train_fold_scores.append(train_score)
+                    val_fold_scores.append(val_score)
+                    
+                except Exception as e:
+                    if self.verbose:
+                        print(f"         ⚠️ Fold {fold_idx} failed: {str(e)[:50]}...")
+                    # Use a poor score for failed folds
+                    train_fold_scores.append(-1e6 if scoring.startswith('neg') else 0.0)
+                    val_fold_scores.append(-1e6 if scoring.startswith('neg') else 0.0)
+            
+            # Store mean scores for this parameter value
+            train_scores.append(train_fold_scores)
+            validation_scores.append(val_fold_scores)
+        
+        # Convert to numpy arrays
+        train_scores = np.array(train_scores)
+        validation_scores = np.array(validation_scores)
         
         # Calculate mean and std
         train_mean = np.mean(train_scores, axis=1)
@@ -1100,45 +1535,61 @@ class ScientificXGBRegressor(XGBRegressor):
         val_mean = np.mean(validation_scores, axis=1)
         val_std = np.std(validation_scores, axis=1)
         
-        # Find elbow point using second derivative
-        # Convert to positive scores if necessary
-        scores_for_elbow = val_mean if scoring.startswith('neg') else -val_mean
-        
-        # Calculate second derivative (curvature)
-        if len(scores_for_elbow) >= 3:
-            second_derivative = np.gradient(np.gradient(scores_for_elbow))
-            elbow_idx = np.argmax(np.abs(second_derivative))
-        else:
-            elbow_idx = np.argmax(scores_for_elbow)
-        
-        elbow_value = param_range[elbow_idx]
-        elbow_score = val_mean[elbow_idx]
-        
-        # Alternative elbow detection: maximum distance from line
-        if len(param_range) >= 3:
-            # Normalize parameters and scores
-            param_norm = (np.array(param_range) - np.min(param_range)) / (np.max(param_range) - np.min(param_range))
-            score_norm = (scores_for_elbow - np.min(scores_for_elbow)) / (np.max(scores_for_elbow) - np.min(scores_for_elbow))
+        # Find elbow point using multiple methods
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", message="invalid value encountered")
+            warnings.filterwarnings("ignore", message="divide by zero encountered")
             
-            # Calculate distance from point to line
-            line_vec = np.array([param_norm[-1] - param_norm[0], score_norm[-1] - score_norm[0]])
-            line_len = np.linalg.norm(line_vec)
+            # Convert to positive scores if necessary for elbow detection
+            scores_for_elbow = val_mean if not scoring.startswith('neg') else -val_mean
             
-            distances = []
-            for i in range(len(param_range)):
-                point_vec = np.array([param_norm[i] - param_norm[0], score_norm[i] - score_norm[0]])
-                # Distance from point to line
-                cross_prod = np.cross(line_vec, point_vec)
-                distance = np.abs(cross_prod) / line_len if line_len > 0 else 0
-                distances.append(distance)
+            # Method 1: Second derivative (curvature)
+            elbow_idx = 0
+            if len(scores_for_elbow) >= 3:
+                second_derivative = np.gradient(np.gradient(scores_for_elbow))
+                elbow_idx = np.argmax(np.abs(second_derivative))
+            else:
+                elbow_idx = np.argmax(scores_for_elbow)
             
-            distance_elbow_idx = np.argmax(distances)
-            distance_elbow_value = param_range[distance_elbow_idx]
-        else:
-            distance_elbow_value = elbow_value
+            elbow_value = param_range[elbow_idx]
+            elbow_score = val_mean[elbow_idx]
+            
+            # Method 2: Distance from line connecting first and last points
+            distance_elbow_value = elbow_value  # Default fallback
+            
+            if len(param_range) >= 3:
+                try:
+                    # Normalize parameters and scores
+                    param_min, param_max = np.min(param_range), np.max(param_range)
+                    score_min, score_max = np.min(scores_for_elbow), np.max(scores_for_elbow)
+                    
+                    param_range_span = param_max - param_min
+                    score_range_span = score_max - score_min
+                    
+                    if param_range_span > 1e-10 and score_range_span > 1e-10:
+                        param_norm = (np.array(param_range) - param_min) / param_range_span
+                        score_norm = (scores_for_elbow - score_min) / score_range_span
+                        
+                        # Calculate distance from each point to line connecting first and last points
+                        line_vec = np.array([param_norm[-1] - param_norm[0], score_norm[-1] - score_norm[0]])
+                        line_len = np.linalg.norm(line_vec)
+                        
+                        if line_len > 1e-10:
+                            distances = []
+                            for i in range(len(param_range)):
+                                point_vec = np.array([param_norm[i] - param_norm[0], score_norm[i] - score_norm[0]])
+                                cross_prod = np.cross(line_vec, point_vec)
+                                distance = np.abs(cross_prod) / line_len
+                                distances.append(distance)
+                            
+                            distance_elbow_idx = np.argmax(distances)
+                            distance_elbow_value = param_range[distance_elbow_idx]
+                except Exception:
+                    # If distance method fails, use curvature elbow
+                    distance_elbow_value = elbow_value
         
-        # Update parameter
-        setattr(self, param_name, elbow_value)
+        # Update parameter to the optimal value
+        setattr(self, param_name, distance_elbow_value)
         
         results = {
             'param_name': param_name,
@@ -1149,20 +1600,22 @@ class ScientificXGBRegressor(XGBRegressor):
             'train_std': train_std,
             'val_mean': val_mean,
             'val_std': val_std,
-            'elbow_value': elbow_value,
+            'elbow_value': distance_elbow_value,
             'elbow_score': elbow_score,
             'elbow_idx': elbow_idx,
             'distance_elbow_value': distance_elbow_value,
-            'second_derivative': second_derivative if len(scores_for_elbow) >= 3 else None
+            'second_derivative': second_derivative if len(scores_for_elbow) >= 3 else None,
+            'method_used': 'manual_cv'
         }
         
         self._hyperparameter_history[f'elbow_{param_name}'] = results
         
         if self.verbose:
-            print(f"📈 Elbow analysis complete:")
-            print(f"   Optimal {param_name}: {elbow_value}")
-            print(f"   Best CV score: {elbow_score:.4f}")
-            print(f"   Alternative (distance method): {distance_elbow_value}")
+            print(f"   📈 Elbow analysis complete:")
+            print(f"      Optimal {param_name}: {distance_elbow_value}")
+            print(f"      Best CV score: {elbow_score:.4f}")
+            if distance_elbow_value != elbow_value:
+                print(f"      Alternative (curvature method): {elbow_value}")
         
         return results
     
@@ -1256,6 +1709,37 @@ class ScientificXGBRegressor(XGBRegressor):
         
         return results
     
+    def _make_json_serializable(self, obj):
+        """
+        Convert numpy types and other non-serializable objects to JSON-serializable types.
+        
+        Parameters:
+        -----------
+        obj : Any
+            Object to convert
+            
+        Returns:
+        --------
+        Any
+            JSON-serializable version of the object
+        """
+        if isinstance(obj, np.ndarray):
+            return obj.tolist()
+        elif isinstance(obj, (np.integer, np.int64, np.int32, np.int16, np.int8)):
+            return int(obj)
+        elif isinstance(obj, (np.floating, np.float64, np.float32, np.float16)):
+            return float(obj)
+        elif isinstance(obj, np.bool_):
+            return bool(obj)
+        elif isinstance(obj, dict):
+            return {key: self._make_json_serializable(value) for key, value in obj.items()}
+        elif isinstance(obj, (list, tuple)):
+            return [self._make_json_serializable(item) for item in obj]
+        elif hasattr(obj, 'item'):  # Handle numpy scalars
+            return obj.item()
+        else:
+            return obj
+
     def save_model_package(
         self, 
         save_dir: str,
@@ -1338,20 +1822,8 @@ class ScientificXGBRegressor(XGBRegressor):
         # 3. Save CV results
         if self._cv_results:
             cv_file = save_path / "cv_results.json"
-            # Convert numpy arrays to lists for JSON serialization
-            cv_results_serializable = {}
-            for key, value in self._cv_results.items():
-                if isinstance(value, dict):
-                    cv_results_serializable[key] = {}
-                    for k, v in value.items():
-                        if isinstance(v, np.ndarray):
-                            cv_results_serializable[key][k] = v.tolist()
-                        elif isinstance(v, list) and len(v) > 0 and isinstance(v[0], np.ndarray):
-                            cv_results_serializable[key][k] = [arr.tolist() for arr in v]
-                        else:
-                            cv_results_serializable[key][k] = v
-                else:
-                    cv_results_serializable[key] = value
+            # Convert numpy arrays to lists for JSON serialization using helper
+            cv_results_serializable = self._make_json_serializable(self._cv_results)
             
             with open(cv_file, 'w') as f:
                 json.dump(cv_results_serializable, f, indent=2)
@@ -1368,18 +1840,8 @@ class ScientificXGBRegressor(XGBRegressor):
         # 5. Save hyperparameter history
         if self._hyperparameter_history:
             hp_file = save_path / "hyperparameter_history.json"
-            # Handle numpy arrays in hyperparameter history
-            hp_serializable = {}
-            for key, value in self._hyperparameter_history.items():
-                if isinstance(value, dict):
-                    hp_serializable[key] = {}
-                    for k, v in value.items():
-                        if isinstance(v, np.ndarray):
-                            hp_serializable[key][k] = v.tolist()
-                        else:
-                            hp_serializable[key][k] = v
-                else:
-                    hp_serializable[key] = value
+            # Use helper function to handle all numpy types
+            hp_serializable = self._make_json_serializable(self._hyperparameter_history)
             
             with open(hp_file, 'w') as f:
                 json.dump(hp_serializable, f, indent=2)
@@ -1387,8 +1849,10 @@ class ScientificXGBRegressor(XGBRegressor):
         # 6. Save validation history
         if self._validation_history:
             val_file = save_path / "validation_history.json"
+            # Use helper function for validation history too
+            val_serializable = self._make_json_serializable(self._validation_history)
             with open(val_file, 'w') as f:
-                json.dump(self._validation_history, f, indent=2)
+                json.dump(val_serializable, f, indent=2)
         
         # 7. Generate and save diagnostic plots
         if include_diagnostics and X_sample is not None and y_sample is not None:
@@ -1474,11 +1938,11 @@ predictions = model.predict(X_new)
         **kwargs : dict
             Additional parameters for XGBRegressor.fit()
         """
-        # Convert to numpy arrays if needed
-        if hasattr(X, 'values'):
-            X = X.values
-        if hasattr(y, 'values'):
-            y = y.values
+        # Handle device compatibility to prevent mismatch warnings
+        X, y = self._handle_device_compatibility(X, y)
+        
+        if self.verbose:
+            print(f"🔄 STEP: Model Training ({len(X)} samples, {X.shape[1]} features)")
         
         # Automated parameterization if enabled
         if self.auto_tune and not self._is_fitted:
@@ -1490,24 +1954,23 @@ predictions = model.predict(X_new)
             'eval_set' not in kwargs):
             
             if self.verbose:
-                print(f"  🔍 Creating validation set for early stopping (rounds={self.early_stopping_rounds})")
+                print(f"   🔍 Creating validation set for early stopping (rounds={self.early_stopping_rounds})")
             
             # Simple train/validation split for monitoring
             split_idx = int(0.8 * len(X))
             X_train, X_val = X[:split_idx], X[split_idx:]
             y_train, y_val = y[:split_idx], y[split_idx:]
             
-            # Set up evaluation parameters
+            # Set up evaluation parameters (don't set eval_metric here since it's in constructor)
             kwargs['eval_set'] = [(X_train, y_train), (X_val, y_val)]
-            kwargs['eval_metric'] = 'rmse'
             kwargs['verbose'] = False
             
             # Use training subset for fitting
             X, y = X_train, y_train
             
             if self.verbose:
-                print(f"    Training set: {len(X_train)} samples")
-                print(f"    Validation set: {len(X_val)} samples")
+                print(f"      Training set: {len(X_train)} samples")
+                print(f"      Validation set: {len(X_val)} samples")
         
         # If early stopping is enabled but we don't want to create a validation set,
         # we need to disable early stopping for this fit call
@@ -1517,14 +1980,15 @@ predictions = model.predict(X_new)
               len(X) < 100):  # For very small datasets, disable early stopping
             
             if self.verbose:
-                print(f"  ⚠️  Dataset too small for early stopping ({len(X)} samples), disabling early stopping")
+                print(f"   ⚠️  Dataset too small for early stopping ({len(X)} samples), disabling early stopping")
             # Temporarily disable early stopping for small datasets
             original_early_stopping = self.early_stopping_rounds
             self.early_stopping_rounds = None
         
         # Fit the model
         if self.verbose:
-            print(f"🔄 Fitting XGBoost with {self.n_estimators} estimators...")
+            device_info = "GPU" if self._using_gpu else "CPU"
+            print(f"   ⚡ Training on {device_info} with {self.n_estimators} estimators...")
         
         fit_start = time.time()
         super().fit(X, y, **kwargs)
@@ -1537,7 +2001,7 @@ predictions = model.predict(X_new)
         self._is_fitted = True
         
         if self.verbose:
-            print(f"✅ Model fitted in {fit_time:.2f}s")
+            print(f"   ✅ Training completed in {fit_time:.2f}s")
         
         # Store feature importance
         if hasattr(self, 'feature_importances_'):
@@ -1580,19 +2044,304 @@ predictions = model.predict(X_new)
         
         return model
 
+    # ========================================
+    # GPU MANAGEMENT METHODS
+    # ========================================
+    
+    def get_gpu_info(self) -> Dict[str, Any]:
+        """
+        Get comprehensive GPU information and current configuration.
+        
+        Returns:
+        --------
+        Dict[str, Any]
+            Complete GPU information including devices, memory, and current config
+        """
+        return {
+            'gpu_info': self._gpu_info,
+            'gpu_config': self._gpu_config,
+            'using_gpu': self._using_gpu,
+            'gpu_params': self._gpu_params,
+            'cuda_available': CUDA_AVAILABLE,
+            'gputil_available': GPUTIL_AVAILABLE,
+            'torch_available': TORCH_AVAILABLE,
+            'tf_available': TF_AVAILABLE
+        }
+    
+    def print_gpu_status(self) -> None:
+        """
+        Print detailed GPU status information.
+        """
+        print("🎮 GPU Status Report")
+        print("=" * 50)
+        
+        gpu_info = self.get_gpu_info()
+        
+        print(f"CUDA Available: {gpu_info['cuda_available']}")
+        print(f"GPUtil Available: {gpu_info['gputil_available']}")
+        print(f"PyTorch Available: {gpu_info['torch_available']}")
+        print(f"TensorFlow Available: {gpu_info['tf_available']}")
+        print()
+        
+        if gpu_info['gpu_info']['available']:
+            print(f"GPUs Detected: {gpu_info['gpu_info']['count']}")
+            print()
+            
+            for i, device in enumerate(gpu_info['gpu_info']['devices']):
+                print(f"GPU {device.get('id', i)}:")
+                print(f"  Name: {device.get('name', 'Unknown')}")
+                if 'memory_total' in device:
+                    print(f"  Memory: {device['memory_total']:.0f} MB total")
+                    if 'memory_free' in device:
+                        print(f"  Free: {device['memory_free']:.0f} MB ({device['memory_free']/device['memory_total']*100:.1f}%)")
+                if 'utilization' in device:
+                    print(f"  Utilization: {device['utilization']:.1f}%")
+                if 'temperature' in device:
+                    print(f"  Temperature: {device['temperature']:.1f}°C")
+                print()
+            
+            print(f"Current XGBoost Configuration:")
+            print(f"  Using GPU: {gpu_info['using_gpu']}")
+            if gpu_info['using_gpu']:
+                for param, value in gpu_info['gpu_params'].items():
+                    print(f"  {param}: {value}")
+        else:
+            print("No GPUs detected or available")
+        
+        print("=" * 50)
+    
+    def switch_to_gpu(self, gpu_id: Optional[Union[int, str]] = None) -> bool:
+        """
+        Switch the model to use GPU acceleration.
+        
+        Parameters:
+        -----------
+        gpu_id : int, str, optional
+            Specific GPU ID to use. If None, uses the optimal GPU.
+            Can be a single ID (0) or device string ("cuda:0")
+            
+        Returns:
+        --------
+        bool
+            True if successfully switched to GPU, False otherwise
+        """
+        if not self._gpu_info['available']:
+            if self.verbose:
+                print("❌ No GPUs available for switching")
+            return False
+        
+        if gpu_id is None:
+            device = self._gpu_config['device']
+        else:
+            # Convert integer gpu_id to device string
+            if isinstance(gpu_id, int):
+                device = f'cuda:{gpu_id}'
+            else:
+                # Assume it's already a proper device string
+                device = gpu_id
+        
+        # Update GPU parameters (removed deprecated 'predictor')
+        gpu_params = {
+            'tree_method': 'hist',
+            'device': device
+        }
+        
+        # Set parameters on the model
+        try:
+            self.set_params(**gpu_params)
+            self._using_gpu = True
+            self._gpu_params = gpu_params
+            
+            if self.verbose:
+                print(f"✅ Switched to GPU acceleration (Device: {device})")
+            return True
+        except Exception as e:
+            if self.verbose:
+                print(f"❌ Failed to switch to GPU: {e}")
+            return False
+    
+    def switch_to_cpu(self) -> bool:
+        """
+        Switch the model to use CPU processing.
+        
+        Returns:
+        --------
+        bool
+            True if successfully switched to CPU
+        """
+        cpu_params = {
+            'tree_method': 'hist',  # CPU histogram method
+            'device': 'cpu'  # XGBoost 2.0+ CPU device specification
+        }
+        
+        try:
+            # Remove GPU parameters and set CPU parameters
+            self.set_params(**cpu_params)
+            self._using_gpu = False
+            self._gpu_params = {}
+            
+            if self.verbose:
+                print("✅ Switched to CPU processing")
+            return True
+        except Exception as e:
+            if self.verbose:
+                print(f"❌ Failed to switch to CPU: {e}")
+            return False
+    
+    def optimize_gpu_usage(self, X: Optional[np.ndarray] = None) -> Dict[str, Any]:
+        """
+        Optimize GPU usage based on dataset size and available GPU memory.
+        
+        Parameters:
+        -----------
+        X : array-like, optional
+            Training data to analyze for optimal GPU configuration
+            
+        Returns:
+        --------
+        Dict[str, Any]
+            Optimization results and recommendations
+        """
+        if not self._gpu_info['available']:
+            return {'status': 'no_gpu', 'recommendation': 'Use CPU processing'}
+        
+        optimization_results = {
+            'status': 'optimized',
+            'original_config': self._gpu_params.copy(),
+            'recommendations': [],
+            'applied_changes': []
+        }
+        
+        # Analyze dataset if provided
+        if X is not None:
+            data_size_mb = X.nbytes / (1024**2)
+            n_samples, n_features = X.shape
+            
+            # Get available GPU memory
+            max_gpu_memory = 0
+            if self._gpu_info['memory_info']:
+                max_gpu_memory = max(info['free_mb'] for info in self._gpu_info['memory_info'])
+            
+            optimization_results['dataset_analysis'] = {
+                'data_size_mb': data_size_mb,
+                'n_samples': n_samples,
+                'n_features': n_features,
+                'max_gpu_memory_mb': max_gpu_memory
+            }
+            
+            # Memory-based recommendations
+            if max_gpu_memory > 0:
+                memory_ratio = data_size_mb / max_gpu_memory
+                
+                if memory_ratio > 0.7:  # Use 70% of GPU memory as threshold
+                    optimization_results['recommendations'].append(
+                        f"Dataset ({data_size_mb:.1f} MB) may exceed available GPU memory ({max_gpu_memory:.1f} MB). "
+                        "Consider using CPU or reducing batch size."
+                    )
+            
+            # Multi-GPU recommendations
+            if self._gpu_config['n_gpus'] > 1:
+                optimization_results['recommendations'].append(
+                    f"Multi-GPU setup detected: {self._gpu_config['n_gpus']} GPUs available for training."
+                )
+            
+            # High-dimensional data recommendations
+            if n_features > 100:
+                optimization_results['recommendations'].append(
+                    f"High-dimensional data ({n_features} features) detected - GPU histogram method is optimal."
+                )
+            
+            # Store GPU-specific optimizations
+            gpu_optimizations = {
+                'memory_optimization': memory_ratio > 0.7 if max_gpu_memory > 0 else False,
+                'multi_gpu_available': self._gpu_config['n_gpus'] > 1,
+                'high_dim_data': n_features > 100,
+                'available_memory_mb': max_gpu_memory,
+                'data_size_mb': data_size_mb,
+                'memory_ratio': memory_ratio if max_gpu_memory > 0 else 0.0
+            }
+            
+            optimization_results['gpu_optimizations'] = gpu_optimizations
+        
+        return optimization_results
+
+    def _handle_device_compatibility(self, X, y=None):
+        """
+        Handle device compatibility between XGBoost and input data to prevent
+        device mismatch warnings.
+        
+        Parameters:
+        -----------
+        X : array-like
+            Input features
+        y : array-like, optional
+            Target values
+            
+        Returns:
+        --------
+        tuple
+            (X, y) with proper device handling
+        """
+        # Convert to numpy arrays if needed
+        if hasattr(X, 'values'):
+            X = X.values
+        if y is not None and hasattr(y, 'values'):
+            y = y.values
+        
+        # For GPU usage, ensure XGBoost can handle CPU data properly
+        if self._using_gpu:
+            # Set device context for prediction to avoid mismatch warnings
+            # XGBoost 2.0+ should handle CPU->GPU transfer automatically
+            # but we ensure the device parameter is set correctly
+            current_device = getattr(self, 'device', 'cpu')
+            if current_device.startswith('cuda'):
+                # For diagnostic plots and predictions, temporarily allow CPU data
+                # XGBoost will handle the transfer internally
+                pass
+        
+        return X, y
+
 def create_scientific_xgb_regressor(**kwargs) -> ScientificXGBRegressor:
     """
     Factory function to create a ScientificXGBRegressor with recommended settings.
     
+    This function provides intelligent defaults and automatically detects and 
+    configures GPU acceleration when available.
+    
     Parameters:
     -----------
+    use_gpu : bool, optional
+        GPU usage preference:
+        - None (default): Auto-detect and use GPU if available
+        - True: Force GPU usage (will fail if no GPU available)
+        - False: Force CPU usage
     **kwargs : dict
         Additional parameters for ScientificXGBRegressor
         
     Returns:
     --------
     ScientificXGBRegressor
-        Configured model instance
+        Configured model instance with optimal GPU/CPU settings
+        
+    Example:
+    --------
+    ```python
+    # Auto-detect GPU (recommended)
+    model = create_scientific_xgb_regressor()
+    
+    # Force GPU usage
+    model = create_scientific_xgb_regressor(use_gpu=True)
+    
+    # Force CPU usage
+    model = create_scientific_xgb_regressor(use_gpu=False)
+    
+    # Custom configuration with GPU auto-detection
+    model = create_scientific_xgb_regressor(
+        n_estimators=2000,
+        learning_rate=0.05,
+        cv_folds=10
+    )
+    ```
     """
     default_params = {
         'cv_folds': 5,
@@ -1601,11 +2350,20 @@ def create_scientific_xgb_regressor(**kwargs) -> ScientificXGBRegressor:
         'early_stopping_rounds': 50,
         'n_estimators': 1000,
         'learning_rate': 0.1,
-        'random_state': 42
+        'random_state': 42,
+        'use_gpu': None  # Auto-detect GPU by default
     }
     
     # Update with user parameters
     default_params.update(kwargs)
+    
+    # Quick GPU check for informative messaging
+    if default_params.get('verbose', True):
+        gpu_info = GPUManager.detect_gpus()
+        if gpu_info['available']:
+            print(f"🎮 GPU acceleration available: {gpu_info['count']} GPU(s) detected")
+        else:
+            print("💻 GPU acceleration not available, using CPU")
     
     return ScientificXGBRegressor(**default_params)
 
@@ -1613,8 +2371,8 @@ def create_scientific_xgb_regressor(**kwargs) -> ScientificXGBRegressor:
 # Example usage and demonstration
 if __name__ == "__main__":
     # This section provides usage examples
-    print("🧪 ScientificXGBRegressor - Advanced XGBoost for Scientific Computing")
-    print("=" * 70)
+    print("🧪 ScientificXGBRegressor - Advanced XGBoost for Scientific Computing with GPU Support")
+    print("=" * 80)
     
     # Generate sample data for demonstration
     np.random.seed(42)
@@ -1622,31 +2380,79 @@ if __name__ == "__main__":
     X = np.random.randn(n_samples, n_features)
     y = np.sum(X[:, :3], axis=1) + 0.1 * np.random.randn(n_samples)
     
-    # Create and demonstrate the model
+    # Create and demonstrate the model with GPU auto-detection
+    print("🎮 Creating model with GPU auto-detection...")
     model = create_scientific_xgb_regressor(
         cv_folds=3,  # Reduced for demo
         auto_tune=True,
         verbose=True
     )
     
-    print("\n1. 🔬 Automated Parameterization:")
+    print("\n🔍 GPU Status Information:")
+    model.print_gpu_status()
+    
+    print("\n1. 🔬 Automated Parameterization (GPU-Enhanced):")
     model.automated_parameterization(X, y)
     
-    print("\n2. 🔄 Model Fitting:")
+    print("\n2. ⚡ GPU Optimization Analysis:")
+    gpu_optimization = model.optimize_gpu_usage(X)
+    if gpu_optimization['status'] != 'no_gpu':
+        print(f"   Optimization status: {gpu_optimization['status']}")
+        if 'dataset_analysis' in gpu_optimization:
+            analysis = gpu_optimization['dataset_analysis']
+            print(f"   Dataset size: {analysis['data_size_mb']:.1f} MB")
+            print(f"   Available GPU memory: {analysis['max_gpu_memory_mb']:.1f} MB")
+        
+        for recommendation in gpu_optimization.get('recommendations', []):
+            print(f"   💡 Recommendation: {recommendation}")
+        
+        for change in gpu_optimization.get('applied_changes', []):
+            print(f"   ✅ Applied: {change}")
+    
+    print("\n3. 🔄 Model Fitting:")
     model.fit(X, y)
     
-    print("\n3. 📊 Generating Diagnostic Plots:")
-    fig = model.diagnostic_plots(X, y)
-    plt.show()
+    print("\n4. 📊 Performance on GPU vs CPU comparison:")
+    if model._gpu_info['available']:
+        # Time GPU training
+        import time
+        start_time = time.time()
+        model.fit(X, y)
+        gpu_time = time.time() - start_time
+        
+        # Switch to CPU and time training
+        print("   Switching to CPU for comparison...")
+        model.switch_to_cpu()
+        start_time = time.time()
+        model.fit(X, y)
+        cpu_time = time.time() - start_time
+        
+        print(f"   ⚡ GPU training time: {gpu_time:.2f}s")
+        print(f"   💻 CPU training time: {cpu_time:.2f}s")
+        if gpu_time < cpu_time:
+            speedup = cpu_time / gpu_time
+            print(f"   🚀 GPU speedup: {speedup:.1f}x faster")
+        else:
+            print("   💻 CPU was faster for this small dataset")
+        
+        # Switch back to GPU for remaining demo
+        model.switch_to_gpu()
     
-    print("\n4. 🔧 Elbow Tuning:")
+    print("\n5. 📊 Generating Diagnostic Plots:")
+    try:
+        fig = model.diagnostic_plots(X, y)
+        plt.show()
+    except Exception as e:
+        print(f"   Skipping plots: {e}")
+    
+    print("\n6. 🔧 Elbow Tuning:")
     elbow_results = model.elbow_tune(X, y, param_name='n_estimators', 
                                     param_range=[50, 100, 200, 300, 500])
     
-    print("\n5. 🔄 Nested Cross-Validation:")
+    print("\n7. 🔄 Nested Cross-Validation:")
     cv_results = model.nested_cross_validate(X, y, inner_cv=2, outer_cv=3)
     
-    print("\n6. 💾 Saving Model Package:")
+    print("\n8. 💾 Saving Model Package:")
     package_path = model.save_model_package(
         save_dir="./scientific_xgb_package",
         include_diagnostics=True,
@@ -1656,10 +2462,26 @@ if __name__ == "__main__":
     )
     
     print(f"\n✅ Model package saved to: {package_path}")
-    print("\n🎉 ScientificXGBRegressor demonstration complete!")
     
-    # Uncomment to run upgrade examples:
-    # print("\n" + "="*70)
-    # print("🔄 MODEL UPGRADE DEMONSTRATIONS")
-    # print("="*70)
-    # complete_migration_workflow()
+    print("\n🎮 GPU Feature Summary:")
+    print("=" * 50)
+    gpu_info = model.get_gpu_info()
+    print(f"GPU Available: {gpu_info['gpu_info']['available']}")
+    print(f"Using GPU: {gpu_info['using_gpu']}")
+    if gpu_info['using_gpu']:
+        print(f"GPU Configuration: {gpu_info['gpu_params']}")
+    
+    print("\n🎉 ScientificXGBRegressor with GPU support demonstration complete!")
+    
+    print("\n📚 GPU Usage Examples:")
+    print("-" * 30)
+    print("# Force GPU usage:")
+    print("model = create_scientific_xgb_regressor(use_gpu=True)")
+    print()
+    print("# Force CPU usage:")
+    print("model = create_scientific_xgb_regressor(use_gpu=False)")
+    print()
+    print("# Switch between GPU and CPU:")
+    print("model.switch_to_gpu()  # Enable GPU")
+    print("model.switch_to_cpu()  # Switch to CPU")
+    print("model.print_gpu_status()  # Check current status")

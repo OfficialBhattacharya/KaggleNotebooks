@@ -1,0 +1,31 @@
+# Core ML and data processing libraries
+# Note: NumPy 2.x has compatibility issues with some packages compiled with NumPy 1.x
+# Use NumPy 1.x for better compatibility until ecosystem catches up
+numpy>=1.21.0,<2.0.0
+pandas>=1.3.0
+scikit-learn>=1.0.0
+matplotlib>=3.3.0
+seaborn>=0.11.0
+scipy>=1.7.0
+
+# XGBoost - GPU version recommended for acceleration
+xgboost>=1.5.0  # Use xgboost[gpu] for GPU support
+
+# Optional libraries for advanced features
+optuna>=2.10.0    # For advanced hyperparameter optimization
+shap>=0.40.0      # For model interpretability
+
+# GPU Detection and Support (Optional)
+# These libraries enable automatic GPU detection and optimal configuration
+# Install with: pip install GPUtil torch tensorflow
+GPUtil>=1.4.0           # GPU monitoring and detection (recommended)
+torch>=1.11.0          # PyTorch for CUDA detection (optional)
+tensorflow>=2.8.0      # TensorFlow for GPU detection (optional)
+
+# Development and testing
+pytest>=6.0.0
+jupyter>=1.0.0
+
+# Development and utilities
+pathlib2>=2.3.0  # For Python <3.4 compatibility
+typing-extensions>=4.0.0  # For enhanced type hints 

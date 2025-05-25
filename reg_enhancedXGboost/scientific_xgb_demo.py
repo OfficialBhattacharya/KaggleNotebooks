@@ -15,7 +15,9 @@ import warnings
 warnings.filterwarnings('ignore')
 
 # Import our ScientificXGBRegressor
-from xgboost import ScientificXGBRegressor, create_scientific_xgb_regressor
+import xgboost
+ScientificXGBRegressor = xgboost.ScientificXGBRegressor
+create_scientific_xgb_regressor = xgboost.create_scientific_xgb_regressor
 
 def load_sample_data():
     """
