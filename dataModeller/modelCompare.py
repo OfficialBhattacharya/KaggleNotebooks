@@ -314,7 +314,7 @@ def create_diagnostic_plots(fold_results, cv_predictions, y_train_original, X_te
     
     return fig
 
-def fitPlotAndPredict(X_train, y_train, X_test, model, datasetName, xTransform, yTransform, modelName, cvScheme, time_column=None):
+def fitPlotAndPredict(X_train, y_train, X_test, model, datasetName, xTransform, yTransform, modelName, cvScheme, time_column=None, X_train_full=None, y_train_full=None):
     """
     Fit model using cross-validation, generate diagnostic plots, and make predictions.
     Enhanced with detailed progress reporting and GPU monitoring.
@@ -322,9 +322,9 @@ def fitPlotAndPredict(X_train, y_train, X_test, model, datasetName, xTransform, 
     Parameters:
     -----------
     X_train : array-like of shape (n_samples, n_features)
-        Training feature matrix
+        Training feature matrix for cross-validation (can be a subset)
     y_train : array-like of shape (n_samples,)
-        Training target vector
+        Training target vector for cross-validation (can be a subset)
     X_test : array-like of shape (n_test_samples, n_features)
         Test feature matrix
     model : sklearn estimator
@@ -343,13 +343,19 @@ def fitPlotAndPredict(X_train, y_train, X_test, model, datasetName, xTransform, 
         Name of the time/duration column in X_train for stratified cross-validation. 
         If provided, will use StratifiedKFold based on time bins instead of regular KFold.
         Example: time_column='Duration'
+    X_train_full : array-like of shape (n_full_samples, n_features), optional
+        Full training feature matrix for final predictions. If None, uses X_train.
+    y_train_full : array-like of shape (n_full_samples,), optional
+        Full training target vector for final predictions. If None, uses y_train.
     
     Returns:
     --------
     results : pd.DataFrame
         Single row dataframe with evaluation metrics
     predictions : np.ndarray
-        Predictions on X_test using averaged CV models
+        Predictions on X_test using final model trained on CV subset
+    train_predictions : pd.DataFrame
+        DataFrame with 'actual' and 'predicted' columns containing predictions on full training set
     """
     print(f"\n{'='*80}")
     print(f"🚀 STARTING MODEL TRAINING: {modelName}")
@@ -360,6 +366,18 @@ def fitPlotAndPredict(X_train, y_train, X_test, model, datasetName, xTransform, 
     print(f"⏰ Start Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     
     start_time = time.time()
+    
+    # Determine if we're using separate datasets for CV and final predictions
+    use_full_dataset = X_train_full is not None and y_train_full is not None
+    
+    if use_full_dataset:
+        print(f"📊 Two-stage prediction:")
+        print(f"   CV Dataset: {X_train.shape[0]:,} samples")
+        print(f"   Full Dataset for final predictions: {X_train_full.shape[0]:,} samples")
+        logger.info(f"Two-stage prediction - CV on {X_train.shape[0]} samples, final predictions on {X_train_full.shape[0]} samples")
+    else:
+        print(f"📊 Single dataset training: {X_train.shape[0]:,} samples")
+        logger.info(f"Single dataset training on {X_train.shape[0]} samples")
     
     logger.info(f"Starting fitPlotAndPredict for {modelName} on {datasetName}")
     logger.info(f"X_train shape: {X_train.shape}, y_train shape: {y_train.shape}")
@@ -380,9 +398,11 @@ def fitPlotAndPredict(X_train, y_train, X_test, model, datasetName, xTransform, 
     
     print(f"\n📋 Training Configuration:")
     print(f"   Cross-Validation: {n_folds}-fold")
-    print(f"   Training samples: {X_train.shape[0]:,}")
+    print(f"   CV Training samples: {X_train.shape[0]:,}")
     print(f"   Features: {X_train.shape[1]:,}")
     print(f"   Test samples: {X_test.shape[0]:,}")
+    if use_full_dataset:
+        print(f"   Full Dataset samples: {X_train_full.shape[0]:,}")
     
     logger.info(f"Using {n_folds}-fold cross-validation")
     
@@ -408,6 +428,13 @@ def fitPlotAndPredict(X_train, y_train, X_test, model, datasetName, xTransform, 
         y_train = y_train.values
     if hasattr(X_test, 'values'):
         X_test = X_test.values
+    
+    # Handle full dataset conversion
+    if use_full_dataset:
+        if hasattr(X_train_full, 'values'):
+            X_train_full = X_train_full.values
+        if hasattr(y_train_full, 'values'):
+            y_train_full = y_train_full.values
     
     # Store original data for metrics calculation
     y_train_original = y_train.copy()
@@ -474,19 +501,48 @@ def fitPlotAndPredict(X_train, y_train, X_test, model, datasetName, xTransform, 
         
         # Monitor GPU utilization during training
         def monitor_gpu_utilization():
-            if gpu_info['cuda_available']:
+            """Monitor GPU utilization and memory usage"""
+            try:
+                import pynvml
+                pynvml.nvmlInit()
+                gpu_count = pynvml.nvmlDeviceGetCount()
+                
+                gpu_status = []
+                for i in range(gpu_count):
+                    handle = pynvml.nvmlDeviceGetHandleByIndex(i)
+                    
+                    # Get memory info
+                    mem_info = pynvml.nvmlDeviceGetMemoryInfo(handle)
+                    used_gb = mem_info.used / 1024**3
+                    total_gb = mem_info.total / 1024**3
+                    
+                    # Get utilization
+                    try:
+                        util = pynvml.nvmlDeviceGetUtilizationRates(handle)
+                        gpu_util = util.gpu
+                    except:
+                        gpu_util = 0
+                    
+                    gpu_status.append(f"GPU{i}: {used_gb:.1f}GB/{total_gb:.1f}GB ({gpu_util}%)")
+                
+                return " | ".join(gpu_status)
+                
+            except Exception as e:
+                # Fallback for when pynvml is not available
                 try:
                     import torch
-                    gpu_usage = []
-                    for i in range(gpu_info['gpu_count']):
-                        torch.cuda.set_device(i)
-                        memory_allocated = torch.cuda.memory_allocated(i) / (1024**3)  # GB
-                        memory_reserved = torch.cuda.memory_reserved(i) / (1024**3)  # GB
-                        gpu_usage.append(f"GPU{i}: {memory_allocated:.1f}GB/{memory_reserved:.1f}GB")
-                    return " | ".join(gpu_usage)
+                    if torch.cuda.is_available():
+                        gpu_count = torch.cuda.device_count()
+                        gpu_status = []
+                        for i in range(gpu_count):
+                            allocated = torch.cuda.memory_allocated(i) / 1024**3
+                            cached = torch.cuda.memory_reserved(i) / 1024**3
+                            gpu_status.append(f"GPU{i}: {allocated:.1f}GB/{cached:.1f}GB")
+                        return " | ".join(gpu_status)
+                    else:
+                        return "No GPU"
                 except:
-                    return "GPU monitoring unavailable"
-            return "CPU mode"
+                    return "GPU status unavailable"
         
         print(f"💾 GPU Status: {monitor_gpu_utilization()}")
         
@@ -539,11 +595,28 @@ def fitPlotAndPredict(X_train, y_train, X_test, model, datasetName, xTransform, 
                         self.n_folds = n_folds
                         self.last_print_time = time.time()
                         self.print_interval = 10  # Print every 10 seconds
+                        self.best_score = float('inf')
+                        self.rounds_without_improvement = 0
+                        self.max_rounds_without_improvement = 2000  # Allow up to 2000 rounds without improvement
+                        self.max_iterations = 2000  # Maximum total iterations
                     
                     def after_iteration(self, model, epoch, evals_log):
                         current_time = time.time()
+                        iteration = epoch
+                        
+                        # Check for improvement
+                        current_score = float('inf')
+                        if evals_log and 'validation_1' in evals_log and 'rmse' in evals_log['validation_1']:
+                            current_score = evals_log['validation_1']['rmse'][-1]
+                            
+                            if current_score < self.best_score:
+                                self.best_score = current_score
+                                self.rounds_without_improvement = 0
+                            else:
+                                self.rounds_without_improvement += 1
+                        
+                        # Print progress every 10 seconds
                         if current_time - self.last_print_time >= self.print_interval:
-                            iteration = epoch
                             # Handle different evaluation result formats
                             train_score = "N/A"
                             val_score = "N/A"
@@ -559,6 +632,15 @@ def fitPlotAndPredict(X_train, y_train, X_test, model, datasetName, xTransform, 
                             print(f"   📊 Iteration {iteration:4d} | Train RMSE: {train_score} | Val RMSE: {val_score} | GPU: {monitor_gpu_utilization()}")
                             self.last_print_time = current_time
                         
+                        # Custom early stopping logic: stop only if we've reached max iterations
+                        # OR if we've gone 2000 rounds without improvement (which is very generous)
+                        if iteration >= self.max_iterations:
+                            print(f"   🛑 Stopping at maximum iterations: {self.max_iterations}")
+                            return True  # Stop training
+                        elif self.rounds_without_improvement >= self.max_rounds_without_improvement:
+                            print(f"   🛑 Stopping after {self.max_rounds_without_improvement} rounds without improvement")
+                            return True  # Stop training
+                        
                         return False  # Continue training
                 
                 progress_callback = ProgressCallback(fold_idx, n_folds)
@@ -572,41 +654,25 @@ def fitPlotAndPredict(X_train, y_train, X_test, model, datasetName, xTransform, 
                 use_verbose = 100  # Show progress every 100 iterations
             
             try:
+                # Temporarily disable built-in early stopping since we're using custom logic
+                original_early_stopping = fold_model.early_stopping_rounds
+                fold_model.early_stopping_rounds = None
+                
                 fold_model.fit(
                     X_fold_train, y_fold_train,
                     eval_set=[(X_fold_train, y_fold_train), (X_fold_val, y_fold_val)],
                     callbacks=callbacks_list,
                     verbose=use_verbose
                 )
+                
+                # Restore original early stopping setting
+                fold_model.early_stopping_rounds = original_early_stopping
+                
             except Exception as e:
                 # Ultimate fallback - train without evaluation set
                 print(f"   ⚠️  Callback training failed ({type(e).__name__}), using simple training...")
                 fold_model.fit(X_fold_train, y_fold_train, verbose=use_verbose)
             
-        elif 'CatBoost' in model_type and hasattr(fold_model, 'early_stopping_rounds') and fold_model.early_stopping_rounds is not None:
-            # CatBoost model with early stopping - provide validation set
-            print(f"⚡ Training CatBoost with early stopping...")
-            logger.info("CatBoost model detected with early stopping - providing validation set")
-            
-            # Check GPU usage for CatBoost
-            if hasattr(fold_model, 'task_type') and fold_model.task_type == 'GPU':
-                print(f"   🎮 GPU Training: task_type='GPU'")
-                if hasattr(fold_model, 'devices'):
-                    print(f"   🚀 GPU Devices: {fold_model.devices}")
-                logger.info("✓ CatBoost using GPU acceleration (task_type='GPU')")
-            elif gpu_info['cuda_available']:
-                print(f"   ⚠️  GPU available but not being used by CatBoost")
-                logger.warning("⚠️  GPU available but CatBoost may not be using it")
-                logger.warning("   Consider setting task_type='GPU' for GPU acceleration")
-            else:
-                print(f"   ℹ️  No GPU available - using CPU")
-                logger.info("ℹ️  No GPU available - using CPU")
-            
-            fold_model.fit(
-                X_fold_train, y_fold_train,
-                eval_set=(X_fold_val, y_fold_val),
-                verbose=100  # Print every 100 iterations
-            )
         else:
             # Standard model fitting for other models
             print(f"⚡ Training {model_type}...")
@@ -687,49 +753,15 @@ def fitPlotAndPredict(X_train, y_train, X_test, model, datasetName, xTransform, 
         logger.info(f"Fold {fold_idx + 1} - OOF RMSLE: {oof_metrics['RMSLE']:.4f}, "
                    f"RMSE: {oof_metrics['RMSE']:.4f}, R²: {oof_metrics['R2']:.4f}")
     
-    total_training_time = time.time() - start_time
+    cv_training_time = time.time() - start_time
     
     print(f"\n{'='*80}")
     print(f"✅ CROSS-VALIDATION COMPLETED!")
     print(f"{'='*80}")
-    print(f"⏰ Total Training Time: {total_training_time/60:.1f} minutes")
+    print(f"⏰ CV Training Time: {cv_training_time/60:.1f} minutes")
     print(f"⚡ Average Fold Time: {np.mean(fold_times):.1f} seconds")
     
-    # Calculate average test predictions
-    test_predictions = np.mean(test_predictions_folds, axis=0)
-    
-    print(f"\n🔮 Final Prediction Averaging:")
-    logger.info("Final prediction averaging:")
-    logger.info(f"Number of fold predictions: {len(test_predictions_folds)}")
-    for i, fold_preds in enumerate(test_predictions_folds):
-        logger.info(f"Fold {i+1} predictions stats - mean: {fold_preds.mean():.6f}, std: {fold_preds.std():.6f}")
-    
-    print(f"   📊 Averaged {len(test_predictions_folds)} fold predictions")
-    print(f"   📈 Final predictions - mean: {test_predictions.mean():.6f}, std: {test_predictions.std():.6f}")
-    print(f"   📉 Final predictions range: [{test_predictions.min():.6f}, {test_predictions.max():.6f}]")
-    
-    logger.info(f"Final averaged predictions stats - mean: {test_predictions.mean():.6f}, std: {test_predictions.std():.6f}")
-    logger.info(f"Final averaged predictions range: [{test_predictions.min():.6f}, {test_predictions.max():.6f}]")
-    
-    # Check for constant predictions (potential issue)
-    prediction_std = test_predictions.std()
-    if prediction_std < 1e-10:
-        print(f"⚠️  WARNING: ALL PREDICTIONS ARE IDENTICAL!")
-        print(f"   This usually indicates a serious issue with the model or data.")
-        logger.warning("⚠️  ALL PREDICTIONS ARE IDENTICAL!")
-        logger.warning("This usually indicates one of the following issues:")
-        logger.warning("1. Features have no relationship with the target variable")
-        logger.warning("2. All features are constant or nearly constant")
-        logger.warning("3. Data preprocessing removed all signal")
-        logger.warning("4. Model is predicting the mean of the target")
-        logger.warning("Suggestion: Check your data with validate_input_data() function")
-    elif prediction_std < 0.01:
-        print(f"⚠️  WARNING: Very low prediction variance (std={prediction_std:.6f})")
-        print(f"   Model may not be learning meaningful patterns from the data")
-        logger.warning(f"⚠️  Very low prediction variance (std={prediction_std:.6f})")
-        logger.warning("Model may not be learning meaningful patterns from the data")
-    
-    # Calculate overall CV metrics
+    # Calculate overall CV metrics using out-of-fold predictions
     cv_metrics = calculate_metrics(y_train_original, oof_predictions)
     
     # Calculate average train metrics across folds
@@ -737,7 +769,7 @@ def fitPlotAndPredict(X_train, y_train, X_test, model, datasetName, xTransform, 
     for metric in ['RMSLE', 'RMSE', 'MSE', 'MAE', 'R2']:
         avg_train_metrics[metric] = np.mean([fold['train_metrics'][metric] for fold in fold_results])
     
-    print(f"\n📊 FINAL CROSS-VALIDATION METRICS:")
+    print(f"\n📊 CROSS-VALIDATION METRICS:")
     print(f"   🎯 CV RMSE: {cv_metrics['RMSE']:.6f}")
     print(f"   🎯 CV RMSLE: {cv_metrics['RMSLE']:.6f}")
     print(f"   🎯 CV R²: {cv_metrics['R2']:.6f}")
@@ -749,12 +781,139 @@ def fitPlotAndPredict(X_train, y_train, X_test, model, datasetName, xTransform, 
     logger.info(f"Average CV metrics - RMSLE: {cv_metrics['RMSLE']:.4f}, "
                f"RMSE: {cv_metrics['RMSE']:.4f}, R²: {cv_metrics['R2']:.4f}")
     
-    # Create diagnostic plots
+    # ========================================================================
+    # TRAIN FINAL MODEL ON CV SUBSET AND PREDICT ON FULL DATASET
+    # ========================================================================
+    print(f"\n{'='*80}")
+    print(f"🎯 TRAINING FINAL MODEL ON CV SUBSET")
+    print(f"{'='*80}")
+    
+    final_model_start = time.time()
+    
+    # Clone the original model for final training
+    final_model = clone(model)
+    model_type = type(final_model).__name__
+    
+    print(f"🤖 Final Model Type: {model_type}")
+    print(f"📊 Training on CV subset: {X_train.shape[0]:,} samples with {X_train.shape[1]:,} features")
+    if use_full_dataset:
+        print(f"   🎯 Will predict on full dataset: {X_train_full.shape[0]:,} samples")
+    print(f"💾 GPU Status: {monitor_gpu_utilization()}")
+    
+    logger.info("Training final model on CV subset")
+    logger.info(f"Final model type: {model_type}")
+    logger.info(f"CV subset shape: {X_train.shape}")
+    if use_full_dataset:
+        logger.info(f"Full dataset size for predictions: {X_train_full.shape[0]}")
+    
+    # Handle XGBoost with early stopping for final model
+    if 'XGB' in model_type and hasattr(final_model, 'early_stopping_rounds') and final_model.early_stopping_rounds is not None:
+        print(f"⚡ Training final XGBoost model...")
+        logger.info("Final XGBoost model training with early stopping disabled for full training")
+        
+        # For final model, we disable early stopping to use all CV data
+        final_model_params = final_model.get_params()
+        final_model_params['early_stopping_rounds'] = None
+        final_model.set_params(**final_model_params)
+        
+        print(f"   ℹ️  Early stopping disabled for final model training")
+        logger.info("Early stopping disabled for final model to use entire CV subset")
+        
+        # Check GPU configuration
+        if hasattr(final_model, 'device') and 'cuda' in str(final_model.device):
+            print(f"   🎮 GPU Device: {final_model.device}")
+            if gpu_info['multi_gpu_capable']:
+                print(f"   🚀 Multi-GPU Training: {gpu_info['gpu_count']} GPUs available")
+        
+        if hasattr(final_model, 'tree_method'):
+            print(f"   🌳 Tree Method: {final_model.tree_method}")
+        
+        # Train final model on CV subset
+        final_model.fit(X_train, y_train, verbose=100)
+        
+    else:
+        # Standard model fitting for other models
+        print(f"⚡ Training final {model_type} model...")
+        logger.info("Final standard model training")
+        final_model.fit(X_train, y_train)
+    
+    final_training_time = time.time() - final_model_start
+    total_time = time.time() - start_time
+    
+    print(f"⏱️  Final model training completed in {final_training_time:.1f} seconds")
+    print(f"⏰ Total time (CV + Final): {total_time/60:.1f} minutes")
+    
+    # Make predictions using final model
+    print(f"\n🔮 Making final predictions...")
+    
+    # Determine which dataset to use for final train predictions
+    if use_full_dataset:
+        X_final = X_train_full
+        y_final = y_train_full
+        print(f"   📈 Using final model (trained on CV subset) to predict on full dataset")
+        logger.info("Using final model trained on CV subset to predict on full dataset")
+    else:
+        X_final = X_train
+        y_final = y_train
+        print(f"   📈 Using final model to predict on CV subset")
+        logger.info("Using final model to predict on CV subset")
+    
+    # Predictions on final dataset (full or CV subset)
+    final_train_predictions = final_model.predict(X_final)
+    final_train_metrics = calculate_metrics(y_final, final_train_predictions)
+    
+    # Predictions on test set
+    final_test_predictions = final_model.predict(X_test)
+    
+    logger.info(f"Final train predictions stats - mean: {final_train_predictions.mean():.6f}, std: {final_train_predictions.std():.6f}")
+    logger.info(f"Final test predictions stats - mean: {final_test_predictions.mean():.6f}, std: {final_test_predictions.std():.6f}")
+    
+    print(f"   📈 Final train predictions - mean: {final_train_predictions.mean():.6f}, std: {final_train_predictions.std():.6f}")
+    print(f"   📈 Final test predictions - mean: {final_test_predictions.mean():.6f}, std: {final_test_predictions.std():.6f}")
+    
+    # Check for constant predictions (potential issue)
+    prediction_std = final_test_predictions.std()
+    if prediction_std < 1e-10:
+        print(f"⚠️  WARNING: ALL FINAL PREDICTIONS ARE IDENTICAL!")
+        print(f"   This usually indicates a serious issue with the model or data.")
+        logger.warning("⚠️  ALL FINAL PREDICTIONS ARE IDENTICAL!")
+        logger.warning("This usually indicates one of the following issues:")
+        logger.warning("1. Features have no relationship with the target variable")
+        logger.warning("2. All features are constant or nearly constant")
+        logger.warning("3. Data preprocessing removed all signal")
+        logger.warning("4. Model is predicting the mean of the target")
+        logger.warning("Suggestion: Check your data with validate_input_data() function")
+    elif prediction_std < 0.01:
+        print(f"⚠️  WARNING: Very low final prediction variance (std={prediction_std:.6f})")
+        print(f"   Model may not be learning meaningful patterns from the data")
+        logger.warning(f"⚠️  Very low final prediction variance (std={prediction_std:.6f})")
+        logger.warning("Model may not be learning meaningful patterns from the data")
+    
+    print(f"\n📊 FINAL MODEL METRICS (trained on CV subset, predicting on {'full dataset' if use_full_dataset else 'CV subset'}):")
+    print(f"   🎯 Final Train RMSE: {final_train_metrics['RMSE']:.6f}")
+    print(f"   🎯 Final Train RMSLE: {final_train_metrics['RMSLE']:.6f}")
+    print(f"   🎯 Final Train R²: {final_train_metrics['R2']:.6f}")
+    print(f"   🎯 Final Train MAE: {final_train_metrics['MAE']:.6f}")
+    
+    logger.info(f"Final model metrics - RMSLE: {final_train_metrics['RMSLE']:.4f}, "
+               f"RMSE: {final_train_metrics['RMSE']:.4f}, R²: {final_train_metrics['R2']:.4f}")
+    
+    # Create diagnostic plots using out-of-fold predictions for CV analysis
     print(f"\n🎨 Creating diagnostic plots...")
     logger.info("Creating diagnostic plots...")
     fig = create_diagnostic_plots(fold_results, oof_predictions, y_train_original, 
-                                X_test, test_predictions, modelName, datasetName)
+                                X_test, final_test_predictions, modelName, datasetName)
     plt.show()
+    
+    # Create train predictions dataframe using final model predictions
+    print(f"\n📊 Creating train predictions dataframe (final model predictions on {'full dataset' if use_full_dataset else 'CV subset'})...")
+    train_predictions_df = pd.DataFrame({
+        'actual': y_final,
+        'predicted': final_train_predictions
+    })
+    
+    logger.info(f"Train predictions dataframe created with shape: {train_predictions_df.shape}")
+    logger.info(f"Train predictions stats - actual mean: {train_predictions_df['actual'].mean():.6f}, predicted mean: {train_predictions_df['predicted'].mean():.6f}")
     
     # Create results dataframe
     results = pd.DataFrame({
@@ -763,87 +922,45 @@ def fitPlotAndPredict(X_train, y_train, X_test, model, datasetName, xTransform, 
         'yTransform': [yTransform],
         'modelName': [modelName],
         'cvScheme': [cvScheme],
-        'Train_RMSLE': [avg_train_metrics['RMSLE']],
-        'Train_RMSE': [avg_train_metrics['RMSE']],
-        'Train_MSE': [avg_train_metrics['MSE']],
-        'Train_MAE': [avg_train_metrics['MAE']],
-        'Train_R2': [avg_train_metrics['R2']],
-        'CV_RMSLE': [cv_metrics['RMSLE']],
+        'Train_RMSLE': [final_train_metrics['RMSLE']],  # Final model metrics
+        'Train_RMSE': [final_train_metrics['RMSE']],
+        'Train_MSE': [final_train_metrics['MSE']],
+        'Train_MAE': [final_train_metrics['MAE']],
+        'Train_R2': [final_train_metrics['R2']],
+        'CV_RMSLE': [cv_metrics['RMSLE']],  # Cross-validation metrics
         'CV_RMSE': [cv_metrics['RMSE']],
         'CV_MSE': [cv_metrics['MSE']],
         'CV_MAE': [cv_metrics['MAE']],
         'CV_R2': [cv_metrics['R2']],
-        'Total_Time_Minutes': [total_training_time/60],
-        'Avg_Fold_Time_Seconds': [np.mean(fold_times)]
+        'Total_Time_Minutes': [total_time/60],
+        'CV_Time_Minutes': [cv_training_time/60],
+        'Final_Training_Time_Seconds': [final_training_time],
+        'Avg_Fold_Time_Seconds': [np.mean(fold_times)],
+        'CV_Samples': [X_train.shape[0]],
+        'Final_Prediction_Samples': [X_final.shape[0]]
     })
     
     print(f"\n📋 RESULTS SUMMARY:")
-    print(results[['modelName', 'CV_RMSE', 'CV_RMSLE', 'CV_R2', 'Total_Time_Minutes']].to_string(index=False))
+    print(results[['modelName', 'CV_RMSE', 'CV_RMSLE', 'CV_R2', 'Train_RMSE', 'Train_R2', 'CV_Samples', 'Final_Prediction_Samples', 'Total_Time_Minutes']].to_string(index=False))
     
     logger.info("Results summary:")
     logger.info(f"\n{results.to_string(index=False)}")
     
     print(f"\n🎉 Training completed successfully!")
     print(f"⏰ End Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    if use_full_dataset:
+        print(f"📊 Model trained on CV subset: {X_train.shape[0]:,} samples")
+        print(f"📊 Final predictions made on full dataset: {X_final.shape[0]:,} samples")
+        print(f"🔮 Test predictions generated using final model (trained on CV subset)")
+        print(f"📈 Train predictions generated using final model (on full dataset)")
+    else:
+        print(f"📊 Model trained and predictions made on: {X_final.shape[0]:,} samples")
+        print(f"🔮 Test predictions generated using final model")
+        print(f"📈 Train predictions generated using final model")
     print(f"{'='*80}")
     
-    return results, test_predictions
+    return results, final_test_predictions, train_predictions_df
 
-# Example usage
-"""
-# Simple example usage:
-
-from sklearn.linear_model import LinearRegression
-import numpy as np
-import pandas as pd
-
-# Example parameters
-model = LinearRegression(fit_intercept=True)
-datasetName = 'Sample_Dataset'
-xTransform = 'none'
-yTransform = 'none'
-modelName = 'LinearRegression_Example'
-cvScheme = '5-fold CV'
-
-# Generate sample data with Duration column
-np.random.seed(42)
-n_samples, n_features = 1000, 5
-feature_data = np.random.randn(n_samples, n_features)
-duration_data = np.random.exponential(scale=2.0, size=n_samples) + 1.0  # Simulated duration data
-
-# Create DataFrame with Duration column
-X_train = pd.DataFrame(feature_data, columns=[f'Feature_{i}' for i in range(n_features)])
-X_train['Duration'] = duration_data
-
-# Create target with some relationship to features
-y_train = 2*X_train['Feature_0'] + 1.5*X_train['Feature_1'] + np.random.randn(n_samples)*0.1 + 3
-
-# Create test data (without Duration column for prediction)
-X_test = pd.DataFrame(np.random.randn(200, n_features), columns=[f'Feature_{i}' for i in range(n_features)])
-
-# Option 1: Regular cross-validation (without time column)
-results, predictions = fitPlotAndPredict(
-    X_train.drop('Duration', axis=1), y_train, X_test, model, datasetName, 
-    xTransform, yTransform, modelName, cvScheme
-)
-
-# Option 2: Stratified cross-validation with Duration column
-results_stratified, predictions_stratified = fitPlotAndPredict(
-    X_train, y_train, X_test, model, datasetName, 
-    xTransform, yTransform, modelName, cvScheme, 
-    time_column='Duration'
-)
-
-print("Regular CV Results:")
-print(results)
-print(f"Predictions range: [{predictions.min():.6f}, {predictions.max():.6f}]")
-print(f"Sample predictions: {predictions[:5]}")
-
-print("\nStratified CV Results:")
-print(results_stratified)
-print(f"Predictions range: [{predictions_stratified.min():.6f}, {predictions_stratified.max():.6f}]")
-print(f"Sample predictions: {predictions_stratified[:5]}")
-"""
 
 def validate_input_data(X_train, y_train, X_test):
     """
@@ -908,19 +1025,19 @@ def validate_input_data(X_train, y_train, X_test):
 
 def create_gpu_optimized_model(model_type='xgboost', **kwargs):
     """
-    Create GPU-optimized models with proper multi-GPU configuration.
+    Create GPU-optimized XGBoost models with proper multi-GPU configuration.
     
     Parameters:
     -----------
     model_type : str
-        Type of model to create ('xgboost' or 'catboost')
+        Type of model to create (only 'xgboost' supported)
     **kwargs : dict
         Additional parameters for the model
     
     Returns:
     --------
     model : sklearn estimator
-        Configured model with GPU optimization if available
+        Configured XGBoost model with GPU optimization if available
     """
     gpu_info = check_gpu_availability()
     
@@ -933,14 +1050,14 @@ def create_gpu_optimized_model(model_type='xgboost', **kwargs):
                 'max_depth': 9,
                 'colsample_bytree': 0.7,
                 'subsample': 0.9,
-                'n_estimators': 3000,
+                'n_estimators': 2000,  # Set max iterations to 2000
                 'learning_rate': 0.009,
                 'gamma': 0.01,
                 'max_delta_step': 2,
                 'eval_metric': 'rmse',
                 'enable_categorical': False,
                 'random_state': 42,
-                'early_stopping_rounds': 100,
+                'early_stopping_rounds': None,  # Disable early stopping initially
                 'tree_method': 'hist',
                 'device': 'cpu'  # Default to CPU, will be overridden if GPU available
             }
@@ -960,13 +1077,15 @@ def create_gpu_optimized_model(model_type='xgboost', **kwargs):
                         'tree_method': 'hist',  # GPU histogram method
                         'max_bin': 256,  # Optimize for GPU memory
                         'grow_policy': 'lossguide',  # Better for GPU
-                        'sampling_method': 'gradient_based'  # GPU-optimized sampling
+                        'sampling_method': 'gradient_based',  # GPU-optimized sampling
+                        'n_jobs': gpu_info['gpu_count'],  # Explicitly set number of parallel jobs
+                        'early_stopping_rounds': 2000  # Continue until 2000 iterations or 2000 rounds without improvement
                     })
                     
                     # Adjust parameters for multi-GPU efficiency
                     if gpu_info['gpu_count'] >= 2:
                         # Increase batch size effectively by allowing more complex models
-                        default_params['n_estimators'] = min(default_params['n_estimators'] * 1.2, 4000)
+                        default_params['n_estimators'] = 2000  # Keep at 2000 max
                         default_params['max_depth'] = min(default_params['max_depth'] + 1, 12)
                         # Slightly reduce learning rate for stability with more complex models
                         default_params['learning_rate'] = default_params['learning_rate'] * 0.95
@@ -975,6 +1094,8 @@ def create_gpu_optimized_model(model_type='xgboost', **kwargs):
                     print(f"   Tree Method: {default_params['tree_method']}")
                     print(f"   Max Depth: {default_params['max_depth']}")
                     print(f"   N Estimators: {default_params['n_estimators']}")
+                    print(f"   Early Stopping: {default_params['early_stopping_rounds']} rounds")
+                    print(f"   Parallel Jobs: {default_params['n_jobs']}")
                     
                 else:
                     # Single GPU configuration
@@ -986,11 +1107,13 @@ def create_gpu_optimized_model(model_type='xgboost', **kwargs):
                         'device': 'cuda:0',  # Specific GPU device
                         'tree_method': 'hist',
                         'max_bin': 256,
-                        'grow_policy': 'lossguide'
+                        'grow_policy': 'lossguide',
+                        'early_stopping_rounds': 2000  # Continue until 2000 iterations or 2000 rounds without improvement
                     })
                     
                     print(f"   Configuration: device='cuda:0'")
                     print(f"   Tree Method: {default_params['tree_method']}")
+                    print(f"   Early Stopping: {default_params['early_stopping_rounds']} rounds")
             else:
                 print(f"\n💻 Configuring XGBoost for CPU Training:")
                 print(f"   No GPU available, using optimized CPU settings")
@@ -1023,71 +1146,7 @@ def create_gpu_optimized_model(model_type='xgboost', **kwargs):
             print("❌ XGBoost not available. Please install with: pip install xgboost")
             return None
     
-    elif model_type.lower() == 'catboost':
-        try:
-            from catboost import CatBoostRegressor
-            
-            # Enhanced CatBoost parameters optimized for GPU
-            default_params = {
-                'iterations': 3500,
-                'learning_rate': 0.02,
-                'depth': 12,
-                'loss_function': 'RMSE',
-                'l2_leaf_reg': 3,
-                'random_seed': 42,
-                'eval_metric': 'RMSE',
-                'early_stopping_rounds': 200,
-                'verbose': 0,
-                'task_type': 'CPU'  # Default to CPU
-            }
-            
-            # Configure GPU settings if available
-            if gpu_info['cuda_available']:
-                print(f"\n⚡ Configuring CatBoost for GPU Training:")
-                print(f"   Available GPUs: {gpu_info['gpu_count']}")
-                
-                default_params.update({
-                    'task_type': 'GPU',
-                    'devices': '0' if gpu_info['gpu_count'] == 1 else f"0:{gpu_info['gpu_count']-1}",
-                    'gpu_ram_part': 0.8  # Use 80% of GPU memory
-                })
-                
-                if gpu_info['multi_gpu_capable']:
-                    print(f"   Configuration: Multi-GPU (devices 0-{gpu_info['gpu_count']-1})")
-                    # Adjust parameters for multi-GPU
-                    default_params['iterations'] = min(default_params['iterations'] * 1.2, 5000)
-                else:
-                    print(f"   Configuration: Single GPU (device 0)")
-                
-                print(f"   Task Type: {default_params['task_type']}")
-                print(f"   Devices: {default_params['devices']}")
-            else:
-                print(f"\n💻 Configuring CatBoost for CPU Training:")
-                default_params.update({
-                    'task_type': 'CPU',
-                    'thread_count': -1  # Use all CPU cores
-                })
-            
-            # Update with user parameters
-            default_params.update(kwargs)
-            
-            model = CatBoostRegressor(**default_params)
-            
-            if gpu_info['cuda_available']:
-                logger.info("✓ Created CatBoost model with GPU acceleration")
-                print(f"   ✅ GPU CatBoost model created successfully")
-            else:
-                logger.info("ℹ️  Created CatBoost model for CPU (no GPU available)")
-                print(f"   ✅ CPU CatBoost model created successfully")
-                
-            return model
-            
-        except ImportError:
-            logger.error("CatBoost not available. Please install with: pip install catboost")
-            print("❌ CatBoost not available. Please install with: pip install catboost")
-            return None
-    
     else:
-        logger.error(f"Unsupported model type: {model_type}. Supported types: 'xgboost', 'catboost'")
-        print(f"❌ Unsupported model type: {model_type}. Supported types: 'xgboost', 'catboost'")
+        logger.error(f"Unsupported model type: {model_type}. Only 'xgboost' is supported.")
+        print(f"❌ Unsupported model type: {model_type}. Only 'xgboost' is supported.")
         return None

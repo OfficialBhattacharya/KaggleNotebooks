@@ -133,6 +133,16 @@ def getModelReadyData(train_dataset, test_dataset, xTransform, yTransform, targe
     return X_train, y_train, X_test
 
 
+# Backward compatibility function
+def getModelReadyData_legacy(train_dataset, test_dataset, xTransform, yTransform, target):
+    """
+    Legacy version of getModelReadyData for backward compatibility.
+    This is the original function signature.
+    """
+    result = getModelReadyData(train_dataset, test_dataset, xTransform, yTransform, target)
+    return result[:2]  # Return only X_train, y_train
+
+
 # Example Usage
 if __name__ == "__main__":
     np.random.seed(42)
