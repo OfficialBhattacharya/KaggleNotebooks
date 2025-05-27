@@ -167,7 +167,7 @@ def calculate_metrics(y_true, y_pred):
     return metrics
 
 def create_diagnostic_plots(fold_results, cv_predictions, y_train_original, X_test, test_predictions, 
-                          model_name, dataset_name):
+                          model_name, dataset_name, feature_names=None):
     """
     Create comprehensive diagnostic plots for model analysis.
         
@@ -187,6 +187,8 @@ def create_diagnostic_plots(fold_results, cv_predictions, y_train_original, X_te
         Name of the model
     dataset_name : str
         Name of the dataset
+    feature_names : list, optional
+        List of feature names. If None, will use generic names like 'Feature_0', 'Feature_1', etc.
             
         Returns:
         --------
@@ -258,7 +260,13 @@ def create_diagnostic_plots(fold_results, cv_predictions, y_train_original, X_te
         avg_importance = np.mean(importance_matrix, axis=0)
         std_importance = np.std(importance_matrix, axis=0)
         
-        feature_names = [f'Feature_{i}' for i in range(len(avg_importance))]
+        # Use provided feature names or create generic ones
+        if feature_names is not None and len(feature_names) == len(avg_importance):
+            feature_name_list = feature_names
+        else:
+            feature_name_list = [f'Feature_{i}' for i in range(len(avg_importance))]
+            if feature_names is not None:
+                logger.warning(f"Feature names length ({len(feature_names)}) doesn't match importance length ({len(avg_importance)}). Using generic names.")
         
         # Get top 10 features
         top_indices = np.argsort(avg_importance)[-10:]
@@ -266,7 +274,7 @@ def create_diagnostic_plots(fold_results, cv_predictions, y_train_original, X_te
         axes[2, 0].barh(range(len(top_indices)), avg_importance[top_indices], 
                        xerr=std_importance[top_indices], alpha=0.7)
         axes[2, 0].set_yticks(range(len(top_indices)))
-        axes[2, 0].set_yticklabels([feature_names[i] for i in top_indices])
+        axes[2, 0].set_yticklabels([feature_name_list[i] for i in top_indices])
         axes[2, 0].set_xlabel('Feature Importance')
         axes[2, 0].set_title('Top 10 Feature Importance (Avg ± Std)')
     else:
@@ -420,6 +428,16 @@ def fitPlotAndPredict(X_train, y_train, X_test, model, datasetName, xTransform, 
             time_column = None
     else:
         print(f"   Stratification: Regular KFold (no time column specified)")
+    
+    # Extract feature names before converting to numpy arrays
+    feature_names = None
+    if hasattr(X_train, 'columns'):
+        feature_names = list(X_train.columns)
+        print(f"   📋 Extracted {len(feature_names)} feature names for diagnostic plots")
+        logger.info(f"Extracted feature names: {feature_names[:10]}{'...' if len(feature_names) > 10 else ''}")
+    else:
+        print(f"   📋 No column names available - will use generic feature names in plots")
+        logger.info("No column names available in X_train - using generic feature names")
     
     # Convert to numpy arrays if they are pandas objects
     if hasattr(X_train, 'values'):
@@ -902,7 +920,7 @@ def fitPlotAndPredict(X_train, y_train, X_test, model, datasetName, xTransform, 
     print(f"\n🎨 Creating diagnostic plots...")
     logger.info("Creating diagnostic plots...")
     fig = create_diagnostic_plots(fold_results, oof_predictions, y_train_original, 
-                                X_test, final_test_predictions, modelName, datasetName)
+                                X_test, final_test_predictions, modelName, datasetName, feature_names)
     plt.show()
     
     # Create train predictions dataframe using final model predictions
