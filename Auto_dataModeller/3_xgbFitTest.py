@@ -4,7 +4,6 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 from sklearn.model_selection import KFold, StratifiedKFold, cross_val_score
 from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
-from sklearn.linear_model import LinearRegression
 from sklearn.preprocessing import PowerTransformer, FunctionTransformer, KBinsDiscretizer
 from sklearn.base import clone
 from scipy import stats
@@ -141,9 +140,9 @@ def calculate_rmsle(y_true, y_pred):
     
     return np.sqrt(np.mean((np.log1p(y_true_pos) - np.log1p(y_pred_pos)) ** 2))
 
-def calculate_metrics(y_true, y_pred):
+def calculate_metrics(y_true, y_pred, task_type='auto'):
     """
-    Calculate comprehensive evaluation metrics.
+    Calculate comprehensive evaluation metrics for both regression and classification.
     
     Parameters:
     -----------
@@ -151,19 +150,78 @@ def calculate_metrics(y_true, y_pred):
         True values
     y_pred : array-like
         Predicted values
+    task_type : str, optional
+        Type of task: 'regression', 'classification', or 'auto' to detect automatically
     
     Returns:
     --------
     metrics : dict
-        Dictionary containing all metrics
+        Dictionary containing all metrics appropriate for the task
     """
-    metrics = {
-        'RMSLE': calculate_rmsle(y_true, y_pred),
-        'RMSE': np.sqrt(mean_squared_error(y_true, y_pred)),
-        'MSE': mean_squared_error(y_true, y_pred),
-        'MAE': mean_absolute_error(y_true, y_pred),
-        'R2': r2_score(y_true, y_pred)
-    }
+    # Auto-detect task type if not specified
+    if task_type == 'auto':
+        # Check if y_true contains only 0s and 1s (binary classification)
+        unique_values = np.unique(y_true)
+        if len(unique_values) == 2 and set(unique_values).issubset({0, 1}):
+            task_type = 'classification'
+        else:
+            task_type = 'regression'
+    
+    if task_type == 'regression':
+        metrics = {
+            'RMSLE': calculate_rmsle(y_true, y_pred),
+            'RMSE': np.sqrt(mean_squared_error(y_true, y_pred)),
+            'MSE': mean_squared_error(y_true, y_pred),
+            'MAE': mean_absolute_error(y_true, y_pred),
+            'R2': r2_score(y_true, y_pred)
+        }
+    elif task_type == 'classification':
+        # For classification, we need to handle probability predictions vs class predictions
+        try:
+            from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, roc_auc_score, log_loss
+            
+            # Convert predictions to binary if they are probabilities
+            if np.all((y_pred >= 0) & (y_pred <= 1)) and not np.all(np.isin(y_pred, [0, 1])):
+                # Predictions are probabilities
+                y_pred_binary = (y_pred > 0.5).astype(int)
+                
+                metrics = {
+                    'Accuracy': accuracy_score(y_true, y_pred_binary),
+                    'Precision': precision_score(y_true, y_pred_binary, zero_division=0),
+                    'Recall': recall_score(y_true, y_pred_binary, zero_division=0),
+                    'F1': f1_score(y_true, y_pred_binary, zero_division=0),
+                    'AUC_ROC': roc_auc_score(y_true, y_pred),
+                    'LogLoss': log_loss(y_true, y_pred)
+                }
+            else:
+                # Predictions are already binary classes
+                y_pred_binary = y_pred.astype(int)
+                
+                metrics = {
+                    'Accuracy': accuracy_score(y_true, y_pred_binary),
+                    'Precision': precision_score(y_true, y_pred_binary, zero_division=0),
+                    'Recall': recall_score(y_true, y_pred_binary, zero_division=0),
+                    'F1': f1_score(y_true, y_pred_binary, zero_division=0),
+                    'AUC_ROC': None,  # Cannot calculate AUC without probabilities
+                    'LogLoss': None   # Cannot calculate LogLoss without probabilities
+                }
+                
+        except ImportError:
+            # Fallback if sklearn classification metrics are not available
+            logger.warning("Classification metrics not available, using basic accuracy")
+            y_pred_binary = (y_pred > 0.5).astype(int) if np.all((y_pred >= 0) & (y_pred <= 1)) else y_pred.astype(int)
+            accuracy = np.mean(y_true == y_pred_binary)
+            metrics = {
+                'Accuracy': accuracy,
+                'Precision': None,
+                'Recall': None,
+                'F1': None,
+                'AUC_ROC': None,
+                'LogLoss': None
+            }
+    else:
+        raise ValueError(f"Unsupported task_type: {task_type}. Use 'regression' or 'classification'.")
+    
     return metrics
 
 def create_diagnostic_plots(fold_results, cv_predictions, y_train_original, X_test, test_predictions, 
@@ -205,8 +263,21 @@ def create_diagnostic_plots(fold_results, cv_predictions, y_train_original, X_te
     metrics_df = pd.DataFrame([fold['oof_metrics'] for fold in fold_results])
     metrics_df.index = [f'Fold {i+1}' for i in range(len(fold_results))]
     
-    metrics_to_plot = ['RMSLE', 'RMSE', 'R2']
-    for i, metric in enumerate(metrics_to_plot):
+    # Determine which metrics to plot based on what's available
+    available_metrics = list(metrics_df.columns)
+    
+    # Choose metrics to plot based on task type
+    if 'RMSE' in available_metrics:
+        # Regression metrics
+        metrics_to_plot = ['RMSLE', 'RMSE', 'R2'] if all(m in available_metrics for m in ['RMSLE', 'RMSE', 'R2']) else available_metrics[:3]
+    else:
+        # Classification metrics
+        preferred_clf_metrics = ['Accuracy', 'F1', 'AUC_ROC']
+        metrics_to_plot = [m for m in preferred_clf_metrics if m in available_metrics]
+        if len(metrics_to_plot) < 3:
+            metrics_to_plot.extend([m for m in available_metrics if m not in metrics_to_plot][:3-len(metrics_to_plot)])
+    
+    for i, metric in enumerate(metrics_to_plot[:3]):  # Only plot first 3 metrics
         if i < 3:
             axes[0, i].bar(metrics_df.index, metrics_df[metric], alpha=0.7)
             axes[0, i].set_title(f'{metric} Across CV Folds')
@@ -283,14 +354,20 @@ def create_diagnostic_plots(fold_results, cv_predictions, y_train_original, X_te
         axes[2, 0].set_title('Feature Importance')
     
     # 6. Cross-Validation Stability
-    cv_scores_by_metric = {metric: [fold['oof_metrics'][metric] for fold in fold_results] 
-                          for metric in ['RMSLE', 'RMSE', 'R2']}
-    
-    box_data = [cv_scores_by_metric['RMSLE'], cv_scores_by_metric['RMSE']]
-    axes[2, 1].boxplot(box_data, labels=['RMSLE', 'RMSE'])
-    axes[2, 1].set_ylabel('Score')
-    axes[2, 1].set_title('Cross-Validation Stability')
-    axes[2, 1].grid(True, alpha=0.3)
+    # Use the same metrics that were plotted above for consistency
+    if len(metrics_to_plot) >= 2:
+        cv_scores_by_metric = {metric: [fold['oof_metrics'][metric] for fold in fold_results] 
+                              for metric in metrics_to_plot[:2]}  # Use first 2 metrics
+        
+        box_data = [cv_scores_by_metric[metric] for metric in list(cv_scores_by_metric.keys())]
+        axes[2, 1].boxplot(box_data, labels=list(cv_scores_by_metric.keys()))
+        axes[2, 1].set_ylabel('Score')
+        axes[2, 1].set_title('Cross-Validation Stability')
+        axes[2, 1].grid(True, alpha=0.3)
+    else:
+        axes[2, 1].text(0.5, 0.5, 'Insufficient metrics\nfor stability analysis', 
+                       ha='center', va='center', transform=axes[2, 1].transAxes)
+        axes[2, 1].set_title('Cross-Validation Stability')
     
     # 7. Prediction Intervals (using fold predictions std)
     if len(fold_results) > 1:
@@ -608,30 +685,54 @@ def fitPlotAndPredict(X_train, y_train, X_test, model, datasetName, xTransform, 
                 from xgboost.callback import TrainingCallback
                 
                 class ProgressCallback(TrainingCallback):
-                    def __init__(self, fold_idx, n_folds):
+                    def __init__(self, fold_idx, n_folds, eval_metric='rmse'):
                         self.fold_idx = fold_idx
                         self.n_folds = n_folds
+                        self.eval_metric = eval_metric
                         self.last_print_time = time.time()
                         self.print_interval = 10  # Print every 10 seconds
-                        self.best_score = float('inf')
+                        self.best_score = float('inf') if 'rmse' in eval_metric or 'mae' in eval_metric or 'logloss' in eval_metric else float('-inf')
                         self.rounds_without_improvement = 0
                         self.max_rounds_without_improvement = 2000  # Allow up to 2000 rounds without improvement
                         self.max_iterations = 2000  # Maximum total iterations
+                        self.is_higher_better = 'auc' in eval_metric or 'accuracy' in eval_metric  # Metrics where higher is better
                     
                     def after_iteration(self, model, epoch, evals_log):
                         current_time = time.time()
                         iteration = epoch
                         
-                        # Check for improvement
-                        current_score = float('inf')
-                        if evals_log and 'validation_1' in evals_log and 'rmse' in evals_log['validation_1']:
-                            current_score = evals_log['validation_1']['rmse'][-1]
+                        # Check for improvement - dynamically find the metric
+                        current_score = None
+                        metric_found = False
+                        
+                        if evals_log and 'validation_1' in evals_log:
+                            # Try to find the evaluation metric in the logs
+                            for metric_name in evals_log['validation_1'].keys():
+                                if metric_name in self.eval_metric or self.eval_metric in metric_name:
+                                    current_score = evals_log['validation_1'][metric_name][-1]
+                                    metric_found = True
+                                    break
                             
-                            if current_score < self.best_score:
-                                self.best_score = current_score
-                                self.rounds_without_improvement = 0
+                            # If exact match not found, use the first available metric
+                            if not metric_found and evals_log['validation_1']:
+                                metric_name = list(evals_log['validation_1'].keys())[0]
+                                current_score = evals_log['validation_1'][metric_name][-1]
+                                metric_found = True
+                        
+                        # Update best score and improvement tracking
+                        if current_score is not None:
+                            if self.is_higher_better:
+                                if current_score > self.best_score:
+                                    self.best_score = current_score
+                                    self.rounds_without_improvement = 0
+                                else:
+                                    self.rounds_without_improvement += 1
                             else:
-                                self.rounds_without_improvement += 1
+                                if current_score < self.best_score:
+                                    self.best_score = current_score
+                                    self.rounds_without_improvement = 0
+                                else:
+                                    self.rounds_without_improvement += 1
                         
                         # Print progress every 10 seconds
                         if current_time - self.last_print_time >= self.print_interval:
@@ -641,13 +742,21 @@ def fitPlotAndPredict(X_train, y_train, X_test, model, datasetName, xTransform, 
                             
                             if evals_log:
                                 # Try to get training score
-                                if 'validation_0' in evals_log and 'rmse' in evals_log['validation_0']:
-                                    train_score = f"{evals_log['validation_0']['rmse'][-1]:8.4f}"
+                                if 'validation_0' in evals_log and evals_log['validation_0']:
+                                    first_metric = list(evals_log['validation_0'].keys())[0]
+                                    train_score = f"{evals_log['validation_0'][first_metric][-1]:8.4f}"
+                                
                                 # Try to get validation score
-                                if 'validation_1' in evals_log and 'rmse' in evals_log['validation_1']:
-                                    val_score = f"{evals_log['validation_1']['rmse'][-1]:8.4f}"
+                                if 'validation_1' in evals_log and evals_log['validation_1']:
+                                    first_metric = list(evals_log['validation_1'].keys())[0]
+                                    val_score = f"{evals_log['validation_1'][first_metric][-1]:8.4f}"
+                                    metric_display_name = first_metric.upper()
+                                else:
+                                    metric_display_name = self.eval_metric.upper()
+                            else:
+                                metric_display_name = self.eval_metric.upper()
                             
-                            print(f"   📊 Iteration {iteration:4d} | Train RMSE: {train_score} | Val RMSE: {val_score} | GPU: {monitor_gpu_utilization()}")
+                            print(f"   📊 Iteration {iteration:4d} | Train {metric_display_name}: {train_score} | Val {metric_display_name}: {val_score} | GPU: {monitor_gpu_utilization()}")
                             self.last_print_time = current_time
                         
                         # Custom early stopping logic: stop only if we've reached max iterations
@@ -661,7 +770,7 @@ def fitPlotAndPredict(X_train, y_train, X_test, model, datasetName, xTransform, 
                         
                         return False  # Continue training
                 
-                progress_callback = ProgressCallback(fold_idx, n_folds)
+                progress_callback = ProgressCallback(fold_idx, n_folds, fold_model.eval_metric)
                 callbacks_list = [progress_callback]
                 use_verbose = False
                 
@@ -933,33 +1042,49 @@ def fitPlotAndPredict(X_train, y_train, X_test, model, datasetName, xTransform, 
     logger.info(f"Train predictions dataframe created with shape: {train_predictions_df.shape}")
     logger.info(f"Train predictions stats - actual mean: {train_predictions_df['actual'].mean():.6f}, predicted mean: {train_predictions_df['predicted'].mean():.6f}")
     
-    # Create results dataframe
-    results = pd.DataFrame({
+    # Create results dataframe with dynamic metrics
+    results_dict = {
         'Dataset': [datasetName],
         'xTransform': [xTransform],
         'yTransform': [yTransform],
         'modelName': [modelName],
         'cvScheme': [cvScheme],
-        'Train_RMSLE': [final_train_metrics['RMSLE']],  # Final model metrics
-        'Train_RMSE': [final_train_metrics['RMSE']],
-        'Train_MSE': [final_train_metrics['MSE']],
-        'Train_MAE': [final_train_metrics['MAE']],
-        'Train_R2': [final_train_metrics['R2']],
-        'CV_RMSLE': [cv_metrics['RMSLE']],  # Cross-validation metrics
-        'CV_RMSE': [cv_metrics['RMSE']],
-        'CV_MSE': [cv_metrics['MSE']],
-        'CV_MAE': [cv_metrics['MAE']],
-        'CV_R2': [cv_metrics['R2']],
         'Total_Time_Minutes': [total_time/60],
         'CV_Time_Minutes': [cv_training_time/60],
         'Final_Training_Time_Seconds': [final_training_time],
         'Avg_Fold_Time_Seconds': [np.mean(fold_times)],
         'CV_Samples': [X_train.shape[0]],
         'Final_Prediction_Samples': [X_final.shape[0]]
-    })
+    }
+    
+    # Add train metrics with prefix
+    for metric_name, metric_value in final_train_metrics.items():
+        results_dict[f'Train_{metric_name}'] = [metric_value]
+    
+    # Add CV metrics with prefix
+    for metric_name, metric_value in cv_metrics.items():
+        results_dict[f'CV_{metric_name}'] = [metric_value]
+    
+    results = pd.DataFrame(results_dict)
+    
+    # Determine which metrics to show in summary based on task type
+    summary_columns = ['modelName', 'CV_Samples', 'Final_Prediction_Samples', 'Total_Time_Minutes']
+    
+    # Add task-specific metrics to summary
+    if 'CV_RMSE' in results.columns:
+        # Regression task
+        summary_columns.extend(['CV_RMSE', 'CV_RMSLE', 'CV_R2', 'Train_RMSE', 'Train_R2'])
+    elif 'CV_Accuracy' in results.columns:
+        # Classification task
+        summary_columns.extend(['CV_Accuracy', 'CV_F1', 'Train_Accuracy'])
+        if 'CV_AUC_ROC' in results.columns:
+            summary_columns.append('CV_AUC_ROC')
+    
+    # Filter summary columns to only include those that exist
+    summary_columns = [col for col in summary_columns if col in results.columns]
     
     print(f"\n📋 RESULTS SUMMARY:")
-    print(results[['modelName', 'CV_RMSE', 'CV_RMSLE', 'CV_R2', 'Train_RMSE', 'Train_R2', 'CV_Samples', 'Final_Prediction_Samples', 'Total_Time_Minutes']].to_string(index=False))
+    print(results[summary_columns].to_string(index=False))
     
     logger.info("Results summary:")
     logger.info(f"\n{results.to_string(index=False)}")
@@ -1041,7 +1166,7 @@ def validate_input_data(X_train, y_train, X_test):
     
     print("="*60)
 
-def create_gpu_optimized_model(model_type='xgboost', **kwargs):
+def create_gpu_optimized_model(model_type='xgboost', task_type='regression', monotonic_constraints=None, interaction_constraints=None, **kwargs):
     """
     Create GPU-optimized XGBoost models with proper multi-GPU configuration.
     
@@ -1049,6 +1174,18 @@ def create_gpu_optimized_model(model_type='xgboost', **kwargs):
     -----------
     model_type : str
         Type of model to create (only 'xgboost' supported)
+    task_type : str
+        Type of task: 'regression' or 'classification'
+    monotonic_constraints : dict or list, optional
+        Monotonic constraints for features. Can be:
+        - dict: {feature_index: constraint} where constraint is 1 (increasing), -1 (decreasing), or 0 (no constraint)
+        - list: [constraint1, constraint2, ...] for each feature in order
+        Example: {0: 1, 2: -1} means feature 0 should be monotonically increasing, feature 2 decreasing
+    interaction_constraints : list of lists, optional
+        Feature interaction constraints. Each inner list contains feature indices that can interact.
+        Features not in any list cannot interact with any other features.
+        Example: [[0, 1], [2, 3, 4]] means features 0&1 can interact, features 2&3&4 can interact,
+        but no interactions between these groups or with other features.
     **kwargs : dict
         Additional parameters for the model
     
@@ -1061,7 +1198,18 @@ def create_gpu_optimized_model(model_type='xgboost', **kwargs):
     
     if model_type.lower() == 'xgboost':
         try:
-            from xgboost import XGBRegressor
+            if task_type.lower() == 'regression':
+                from xgboost import XGBRegressor
+                ModelClass = XGBRegressor
+                default_objective = 'reg:squarederror'
+                default_eval_metric = 'rmse'
+            elif task_type.lower() == 'classification':
+                from xgboost import XGBClassifier
+                ModelClass = XGBClassifier
+                default_objective = 'binary:logistic'
+                default_eval_metric = 'logloss'
+            else:
+                raise ValueError(f"Unsupported task_type: {task_type}. Use 'regression' or 'classification'.")
             
             # Enhanced XGBoost parameters optimized for multi-GPU
             default_params = {
@@ -1072,7 +1220,8 @@ def create_gpu_optimized_model(model_type='xgboost', **kwargs):
                 'learning_rate': 0.009,
                 'gamma': 0.01,
                 'max_delta_step': 2,
-                'eval_metric': 'rmse',
+                'objective': default_objective,
+                'eval_metric': default_eval_metric,
                 'enable_categorical': False,
                 'random_state': 42,
                 'early_stopping_rounds': None,  # Disable early stopping initially
@@ -1080,11 +1229,38 @@ def create_gpu_optimized_model(model_type='xgboost', **kwargs):
                 'device': 'cpu'  # Default to CPU, will be overridden if GPU available
             }
             
+            # Add monotonic constraints if provided
+            if monotonic_constraints is not None:
+                if isinstance(monotonic_constraints, dict):
+                    # Convert dict to list format expected by XGBoost
+                    # Assume we need to know the total number of features
+                    max_feature_idx = max(monotonic_constraints.keys()) if monotonic_constraints else 0
+                    monotonic_list = [0] * (max_feature_idx + 1)
+                    for feature_idx, constraint in monotonic_constraints.items():
+                        monotonic_list[feature_idx] = constraint
+                    default_params['monotone_constraints'] = monotonic_list
+                elif isinstance(monotonic_constraints, (list, tuple)):
+                    default_params['monotone_constraints'] = list(monotonic_constraints)
+                else:
+                    raise ValueError("monotonic_constraints must be a dict or list")
+                
+                print(f"\n📊 Monotonic Constraints Applied: {default_params['monotone_constraints']}")
+                logger.info(f"Monotonic constraints: {default_params['monotone_constraints']}")
+            
+            # Add interaction constraints if provided
+            if interaction_constraints is not None:
+                if not isinstance(interaction_constraints, list):
+                    raise ValueError("interaction_constraints must be a list of lists")
+                default_params['interaction_constraints'] = interaction_constraints
+                print(f"\n🔗 Interaction Constraints Applied: {interaction_constraints}")
+                logger.info(f"Interaction constraints: {interaction_constraints}")
+            
             # Configure GPU settings if available
             if gpu_info['cuda_available']:
                 if gpu_info['multi_gpu_capable']:
                     # Multi-GPU configuration
                     print(f"\n⚡ Configuring XGBoost for Multi-GPU Training:")
+                    print(f"   Task Type: {task_type.title()}")
                     print(f"   Available GPUs: {gpu_info['gpu_count']}")
                     print(f"   Total GPU Memory: {gpu_info['total_memory_gb']:.1f} GB")
                     
@@ -1118,6 +1294,7 @@ def create_gpu_optimized_model(model_type='xgboost', **kwargs):
                 else:
                     # Single GPU configuration
                     print(f"\n⚡ Configuring XGBoost for Single GPU Training:")
+                    print(f"   Task Type: {task_type.title()}")
                     print(f"   GPU: {gpu_info['gpu_names'][0]}")
                     print(f"   Memory: {gpu_info['gpu_memory'][0]['total_gb']:.1f} GB")
                     
@@ -1134,6 +1311,7 @@ def create_gpu_optimized_model(model_type='xgboost', **kwargs):
                     print(f"   Early Stopping: {default_params['early_stopping_rounds']} rounds")
             else:
                 print(f"\n💻 Configuring XGBoost for CPU Training:")
+                print(f"   Task Type: {task_type.title()}")
                 print(f"   No GPU available, using optimized CPU settings")
                 default_params.update({
                     'device': 'cpu',
@@ -1144,18 +1322,24 @@ def create_gpu_optimized_model(model_type='xgboost', **kwargs):
             # Update with user parameters (user parameters override defaults)
             default_params.update(kwargs)
             
-            model = XGBRegressor(**default_params)
+            model = ModelClass(**default_params)
+            
+            constraint_info = ""
+            if monotonic_constraints is not None:
+                constraint_info += f" with monotonic constraints"
+            if interaction_constraints is not None:
+                constraint_info += f" with interaction constraints"
             
             if gpu_info['cuda_available']:
                 if gpu_info['multi_gpu_capable']:
-                    logger.info(f"✓ Created XGBoost model with multi-GPU acceleration ({gpu_info['gpu_count']} GPUs)")
-                    print(f"   ✅ Multi-GPU XGBoost model created successfully")
+                    logger.info(f"✓ Created XGBoost {task_type} model with multi-GPU acceleration ({gpu_info['gpu_count']} GPUs){constraint_info}")
+                    print(f"   ✅ Multi-GPU XGBoost {task_type} model created successfully{constraint_info}")
                 else:
-                    logger.info("✓ Created XGBoost model with single GPU acceleration")
-                    print(f"   ✅ Single GPU XGBoost model created successfully")
+                    logger.info(f"✓ Created XGBoost {task_type} model with single GPU acceleration{constraint_info}")
+                    print(f"   ✅ Single GPU XGBoost {task_type} model created successfully{constraint_info}")
             else:
-                logger.info("ℹ️  Created XGBoost model for CPU (no GPU available)")
-                print(f"   ✅ CPU XGBoost model created successfully")
+                logger.info(f"ℹ️  Created XGBoost {task_type} model for CPU (no GPU available){constraint_info}")
+                print(f"   ✅ CPU XGBoost {task_type} model created successfully{constraint_info}")
                 
             return model
             
@@ -1168,3 +1352,326 @@ def create_gpu_optimized_model(model_type='xgboost', **kwargs):
         logger.error(f"Unsupported model type: {model_type}. Only 'xgboost' is supported.")
         print(f"❌ Unsupported model type: {model_type}. Only 'xgboost' is supported.")
         return None
+
+
+# ============================================================================
+# EXAMPLE USAGE FOR ALL 4 XGBOOST MODEL TYPES
+# ============================================================================
+
+"""
+# Example usage of the modelCompare.py script for all 4 XGBoost model types
+# Uncomment and modify the sections below to use in your own projects
+
+# ============================================================================
+# CASE 1: BASIC REGRESSION WITH XGBOOST
+# ============================================================================
+
+# Import required libraries
+import pandas as pd
+import numpy as np
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import StandardScaler
+
+# Load your regression dataset
+# Replace this with your actual data loading
+# data = pd.read_csv('your_regression_dataset.csv')
+# X = data.drop('target_column', axis=1)  # Features
+# y = data['target_column']  # Continuous target variable
+
+# Example with synthetic data
+np.random.seed(42)
+n_samples, n_features = 1000, 5
+X = pd.DataFrame(np.random.randn(n_samples, n_features), 
+                columns=[f'feature_{i}' for i in range(n_features)])
+y = pd.Series(2 * X['feature_0'] + 1.5 * X['feature_1'] - X['feature_2'] + np.random.randn(n_samples) * 0.1)
+
+# Split the data
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+
+# Create basic XGBoost regression model
+model_basic_regression = create_gpu_optimized_model(
+    model_type='xgboost',
+    task_type='regression'
+)
+
+# Train and evaluate the model
+results_basic, predictions_basic, train_preds_basic = fitPlotAndPredict(
+    X_train=X_train,
+    y_train=y_train,
+    X_test=X_test,
+    model=model_basic_regression,
+    datasetName="Basic_Regression_Example",
+    xTransform="StandardScaler",
+    yTransform="None",
+    modelName="XGBoost_Basic_Regression",
+    cvScheme="5-fold CV"
+)
+
+print("Basic Regression Results:")
+print(results_basic)
+
+# ============================================================================
+# CASE 2: REGRESSION WITH MONOTONIC CONSTRAINTS AND FEATURE INTERACTIONS
+# ============================================================================
+
+# For this example, let's assume:
+# - feature_0 should have a monotonically increasing relationship with target
+# - feature_1 should have a monotonically decreasing relationship with target
+# - feature_2 has no monotonic constraint
+# - Features 0 and 1 can interact with each other
+# - Features 2, 3, and 4 can interact among themselves
+# - No interactions between the two groups
+
+# Define monotonic constraints
+monotonic_constraints = {
+    0: 1,   # feature_0: monotonically increasing
+    1: -1,  # feature_1: monotonically decreasing
+    2: 0,   # feature_2: no constraint
+    3: 0,   # feature_3: no constraint
+    4: 0    # feature_4: no constraint
+}
+
+# Define interaction constraints
+interaction_constraints = [
+    [0, 1],      # Features 0 and 1 can interact
+    [2, 3, 4]    # Features 2, 3, and 4 can interact among themselves
+]
+
+# Create XGBoost regression model with constraints
+model_constrained_regression = create_gpu_optimized_model(
+    model_type='xgboost',
+    task_type='regression',
+    monotonic_constraints=monotonic_constraints,
+    interaction_constraints=interaction_constraints,
+    learning_rate=0.01,  # Slightly higher learning rate for constrained model
+    max_depth=8          # Slightly lower depth due to constraints
+)
+
+# Train and evaluate the constrained model
+results_constrained, predictions_constrained, train_preds_constrained = fitPlotAndPredict(
+    X_train=X_train,
+    y_train=y_train,
+    X_test=X_test,
+    model=model_constrained_regression,
+    datasetName="Constrained_Regression_Example",
+    xTransform="StandardScaler",
+    yTransform="None",
+    modelName="XGBoost_Constrained_Regression",
+    cvScheme="5-fold CV"
+)
+
+print("Constrained Regression Results:")
+print(results_constrained)
+
+# ============================================================================
+# CASE 3: BASIC BINARY CLASSIFICATION WITH XGBOOST
+# ============================================================================
+
+# Create binary classification dataset
+# Replace this with your actual binary classification data loading
+# data_clf = pd.read_csv('your_classification_dataset.csv')
+# X_clf = data_clf.drop('target_column', axis=1)  # Features
+# y_clf = data_clf['target_column']  # Binary target (0/1)
+
+# Example with synthetic binary classification data
+np.random.seed(42)
+n_samples_clf, n_features_clf = 1000, 5
+X_clf = pd.DataFrame(np.random.randn(n_samples_clf, n_features_clf), 
+                    columns=[f'feature_{i}' for i in range(n_features_clf)])
+# Create binary target with some relationship to features
+prob = 1 / (1 + np.exp(-(2 * X_clf['feature_0'] + 1.5 * X_clf['feature_1'] - X_clf['feature_2'])))
+y_clf = pd.Series(np.random.binomial(1, prob, n_samples_clf))
+
+# Split the classification data
+X_train_clf, X_test_clf, y_train_clf, y_test_clf = train_test_split(
+    X_clf, y_clf, test_size=0.2, random_state=42, stratify=y_clf
+)
+
+# Create basic XGBoost classification model
+model_basic_classification = create_gpu_optimized_model(
+    model_type='xgboost',
+    task_type='classification'
+)
+
+# Note: For classification, you might want to modify the fitPlotAndPredict function
+# to handle classification metrics (accuracy, precision, recall, F1, AUC-ROC)
+# The current function is optimized for regression metrics
+
+# Train and evaluate the classification model
+results_clf_basic, predictions_clf_basic, train_preds_clf_basic = fitPlotAndPredict(
+    X_train=X_train_clf,
+    y_train=y_train_clf,
+    X_test=X_test_clf,
+    model=model_basic_classification,
+    datasetName="Basic_Classification_Example",
+    xTransform="StandardScaler",
+    yTransform="None",
+    modelName="XGBoost_Basic_Classification",
+    cvScheme="5-fold CV"
+)
+
+print("Basic Classification Results:")
+print(results_clf_basic)
+
+# ============================================================================
+# CASE 4: BINARY CLASSIFICATION WITH MONOTONIC CONSTRAINTS AND INTERACTIONS
+# ============================================================================
+
+# For classification with constraints, let's assume:
+# - feature_0 should monotonically increase the probability of class 1
+# - feature_1 should monotonically decrease the probability of class 1
+# - Features 0 and 1 can interact
+# - Features 2, 3, and 4 can interact among themselves
+
+# Define monotonic constraints for classification
+monotonic_constraints_clf = {
+    0: 1,   # feature_0: increasing probability of class 1
+    1: -1,  # feature_1: decreasing probability of class 1
+    2: 0,   # feature_2: no constraint
+    3: 0,   # feature_3: no constraint
+    4: 0    # feature_4: no constraint
+}
+
+# Define interaction constraints for classification
+interaction_constraints_clf = [
+    [0, 1],      # Features 0 and 1 can interact
+    [2, 3, 4]    # Features 2, 3, and 4 can interact among themselves
+]
+
+# Create XGBoost classification model with constraints
+model_constrained_classification = create_gpu_optimized_model(
+    model_type='xgboost',
+    task_type='classification',
+    monotonic_constraints=monotonic_constraints_clf,
+    interaction_constraints=interaction_constraints_clf,
+    learning_rate=0.01,  # Slightly higher learning rate for constrained model
+    max_depth=8          # Slightly lower depth due to constraints
+)
+
+# Train and evaluate the constrained classification model
+results_clf_constrained, predictions_clf_constrained, train_preds_clf_constrained = fitPlotAndPredict(
+    X_train=X_train_clf,
+    y_train=y_train_clf,
+    X_test=X_test_clf,
+    model=model_constrained_classification,
+    datasetName="Constrained_Classification_Example",
+    xTransform="StandardScaler",
+    yTransform="None",
+    modelName="XGBoost_Constrained_Classification",
+    cvScheme="5-fold CV"
+)
+
+print("Constrained Classification Results:")
+print(results_clf_constrained)
+
+# ============================================================================
+# ADVANCED USAGE EXAMPLES
+# ============================================================================
+
+# Example with time-based stratified cross-validation (useful for time series data)
+# Assuming you have a 'duration' or 'time' column in your dataset
+
+# results_time_based, predictions_time_based, train_preds_time_based = fitPlotAndPredict(
+#     X_train=X_train,
+#     y_train=y_train,
+#     X_test=X_test,
+#     model=model_basic_regression,
+#     datasetName="Time_Based_CV_Example",
+#     xTransform="StandardScaler",
+#     yTransform="None",
+#     modelName="XGBoost_Time_Based_CV",
+#     cvScheme="5-fold CV",
+#     time_column='duration'  # Specify the time column for stratified CV
+# )
+
+# Example with two-stage prediction (CV on subset, final predictions on full dataset)
+# This is useful when you have a large dataset and want to do CV on a subset for speed
+
+# # Create a subset for CV
+# X_train_subset = X_train.sample(n=500, random_state=42)
+# y_train_subset = y_train.loc[X_train_subset.index]
+
+# results_two_stage, predictions_two_stage, train_preds_two_stage = fitPlotAndPredict(
+#     X_train=X_train_subset,      # CV subset
+#     y_train=y_train_subset,      # CV subset
+#     X_test=X_test,
+#     model=model_basic_regression,
+#     datasetName="Two_Stage_Example",
+#     xTransform="StandardScaler",
+#     yTransform="None",
+#     modelName="XGBoost_Two_Stage",
+#     cvScheme="5-fold CV",
+#     X_train_full=X_train,       # Full dataset for final predictions
+#     y_train_full=y_train        # Full dataset for final predictions
+# )
+
+# ============================================================================
+# CUSTOM PARAMETER EXAMPLES
+# ============================================================================
+
+# Example with custom XGBoost parameters
+custom_model = create_gpu_optimized_model(
+    model_type='xgboost',
+    task_type='regression',
+    # Custom parameters that override defaults
+    n_estimators=1500,
+    max_depth=12,
+    learning_rate=0.005,
+    subsample=0.8,
+    colsample_bytree=0.8,
+    gamma=0.1,
+    reg_alpha=0.1,  # L1 regularization
+    reg_lambda=1.0,  # L2 regularization
+    min_child_weight=3
+)
+
+# Example with different evaluation metrics
+custom_model_mae = create_gpu_optimized_model(
+    model_type='xgboost',
+    task_type='regression',
+    eval_metric='mae',  # Use MAE instead of RMSE
+    objective='reg:absoluteerror'  # Use absolute error objective
+)
+
+# ============================================================================
+# TIPS FOR USING MONOTONIC CONSTRAINTS AND INTERACTIONS
+# ============================================================================
+
+# Monotonic Constraints Tips:
+# - Use 1 for features that should monotonically increase the target
+# - Use -1 for features that should monotonically decrease the target  
+# - Use 0 for no constraint (default)
+# - Constraints can help with model interpretability and prevent overfitting
+# - Be careful with constraints - they can hurt performance if incorrectly specified
+
+# Interaction Constraints Tips:
+# - Each list in interaction_constraints represents a group of features that can interact
+# - Features not in any group cannot interact with any other features
+# - This can help prevent overfitting and improve interpretability
+# - Useful when you have domain knowledge about which features should interact
+# - Can significantly reduce model complexity
+
+# Example of more complex interaction constraints:
+# interaction_constraints_complex = [
+#     [0, 1, 2],    # Group 1: Features 0, 1, 2 can interact among themselves
+#     [3, 4],       # Group 2: Features 3, 4 can interact with each other
+#     [5],          # Group 3: Feature 5 can only have main effects (no interactions)
+#     [6, 7, 8, 9]  # Group 4: Features 6, 7, 8, 9 can interact among themselves
+# ]
+
+# ============================================================================
+# VALIDATION AND DEBUGGING
+# ============================================================================
+
+# Always validate your input data before training
+# validate_input_data(X_train, y_train, X_test)
+
+# Check GPU availability
+# gpu_info = check_gpu_availability()
+# print(f"GPU Available: {gpu_info['cuda_available']}")
+# print(f"Number of GPUs: {gpu_info['gpu_count']}")
+
+# Monitor training progress and GPU utilization during training
+# The fitPlotAndPredict function automatically provides detailed progress reporting
+
+"""
