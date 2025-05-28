@@ -1206,8 +1206,8 @@ def create_gpu_optimized_model(model_type='xgboost', task_type='regression', mon
                 'enable_categorical': False,
                 'random_state': 42,
                 'early_stopping_rounds': None,  # Disable early stopping initially
-                'tree_method': 'hist',
-                'device': 'cpu'  # Default to CPU, will be overridden if GPU available
+                'tree_method': 'hist',  # Default to hist method
+                'n_jobs': -1  # Use all CPU cores by default
             }
             
             # Add monotonic constraints if provided
@@ -1245,31 +1245,37 @@ def create_gpu_optimized_model(model_type='xgboost', task_type='regression', mon
                     print(f"   Available GPUs: {gpu_info['gpu_count']}")
                     print(f"   Total GPU Memory: {gpu_info['total_memory_gb']:.1f} GB")
                     
-                    # For XGBoost 2.0+, use device='cuda' for multi-GPU
-                    # XGBoost automatically utilizes all available GPUs
-                    default_params.update({
-                        'device': 'cuda',  # XGBoost 2.0+ automatically uses all GPUs
-                        'tree_method': 'hist',  # GPU histogram method
-                        'max_bin': 256,  # Optimize for GPU memory
-                        'grow_policy': 'lossguide',  # Better for GPU
-                        'sampling_method': 'gradient_based',  # GPU-optimized sampling
-                        'n_jobs': gpu_info['gpu_count'],  # Explicitly set number of parallel jobs
-                        'early_stopping_rounds': 2000  # Continue until 2000 iterations or 2000 rounds without improvement
-                    })
+                    # Try to detect XGBoost version and set appropriate parameters
+                    import xgboost as xgb
+                    xgb_version = tuple(map(int, xgb.__version__.split('.')))
+                    
+                    if xgb_version >= (2, 0, 0):
+                        # XGBoost 2.0+ configuration
+                        default_params.update({
+                            'tree_method': 'gpu_hist',  # Use GPU histogram method
+                            'max_bin': 256,  # Optimize for GPU memory
+                            'grow_policy': 'lossguide',  # Better for GPU
+                            'sampling_method': 'gradient_based',  # GPU-optimized sampling
+                            'n_jobs': gpu_info['gpu_count']  # Explicitly set number of parallel jobs
+                        })
+                        print(f"   Configuration: XGBoost {xgb.__version__} with GPU acceleration")
+                    else:
+                        # Pre-2.0 configuration
+                        default_params.update({
+                            'tree_method': 'gpu_hist',
+                            'predictor': 'gpu_predictor',
+                            'n_jobs': gpu_info['gpu_count']
+                        })
+                        print(f"   Configuration: XGBoost {xgb.__version__} with legacy GPU acceleration")
                     
                     # Adjust parameters for multi-GPU efficiency
                     if gpu_info['gpu_count'] >= 2:
-                        # Increase batch size effectively by allowing more complex models
-                        default_params['n_estimators'] = 2000  # Keep at 2000 max
                         default_params['max_depth'] = min(default_params['max_depth'] + 1, 12)
-                        # Slightly reduce learning rate for stability with more complex models
                         default_params['learning_rate'] = default_params['learning_rate'] * 0.95
                     
-                    print(f"   Configuration: device='cuda' (auto multi-GPU)")
                     print(f"   Tree Method: {default_params['tree_method']}")
                     print(f"   Max Depth: {default_params['max_depth']}")
                     print(f"   N Estimators: {default_params['n_estimators']}")
-                    print(f"   Early Stopping: {default_params['early_stopping_rounds']} rounds")
                     print(f"   Parallel Jobs: {default_params['n_jobs']}")
                     
                 else:
@@ -1280,22 +1286,17 @@ def create_gpu_optimized_model(model_type='xgboost', task_type='regression', mon
                     print(f"   Memory: {gpu_info['gpu_memory'][0]['total_gb']:.1f} GB")
                     
                     default_params.update({
-                        'device': 'cuda:0',  # Specific GPU device
-                        'tree_method': 'hist',
+                        'tree_method': 'gpu_hist',
                         'max_bin': 256,
-                        'grow_policy': 'lossguide',
-                        'early_stopping_rounds': 2000  # Continue until 2000 iterations or 2000 rounds without improvement
+                        'grow_policy': 'lossguide'
                     })
                     
-                    print(f"   Configuration: device='cuda:0'")
                     print(f"   Tree Method: {default_params['tree_method']}")
-                    print(f"   Early Stopping: {default_params['early_stopping_rounds']} rounds")
             else:
                 print(f"\n💻 Configuring XGBoost for CPU Training:")
                 print(f"   Task Type: {task_type.title()}")
                 print(f"   No GPU available, using optimized CPU settings")
                 default_params.update({
-                    'device': 'cpu',
                     'tree_method': 'hist',  # CPU histogram method
                     'n_jobs': -1  # Use all CPU cores
                 })
@@ -1303,7 +1304,20 @@ def create_gpu_optimized_model(model_type='xgboost', task_type='regression', mon
             # Update with user parameters (user parameters override defaults)
             default_params.update(kwargs)
             
-            model = ModelClass(**default_params)
+            # Create the model
+            try:
+                model = ModelClass(**default_params)
+            except TypeError as e:
+                # If we get a parameter error, try removing potentially unsupported parameters
+                print(f"   ⚠️  Parameter error: {str(e)}")
+                print(f"   🔄 Trying with simplified parameters...")
+                
+                # Remove potentially problematic parameters
+                for param in ['grow_policy', 'max_bin', 'sampling_method', 'predictor']:
+                    default_params.pop(param, None)
+                
+                # Try creating model again with simplified parameters
+                model = ModelClass(**default_params)
             
             constraint_info = ""
             if monotonic_constraints is not None:
