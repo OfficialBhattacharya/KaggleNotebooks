@@ -701,74 +701,53 @@ def fitPlotAndPredict(X_train, y_train, X_test, model, datasetName, xTransform, 
                         current_time = time.time()
                         iteration = epoch
                         
-                        # Check for improvement - dynamically find the metric
-                        current_score = None
-                        metric_found = False
-                        
-                        if evals_log and 'validation_1' in evals_log:
-                            # Try to find the evaluation metric in the logs
-                            for metric_name in evals_log['validation_1'].keys():
-                                if metric_name in self.eval_metric or self.eval_metric in metric_name:
-                                    current_score = evals_log['validation_1'][metric_name][-1]
-                                    metric_found = True
-                                    break
-                            
-                            # If exact match not found, use the first available metric
-                            if not metric_found and evals_log['validation_1']:
-                                metric_name = list(evals_log['validation_1'].keys())[0]
-                                current_score = evals_log['validation_1'][metric_name][-1]
-                                metric_found = True
-                        
-                        # Update best score and improvement tracking
-                        if current_score is not None:
-                            if self.is_higher_better:
-                                if current_score > self.best_score:
-                                    self.best_score = current_score
-                                    self.rounds_without_improvement = 0
-                                else:
-                                    self.rounds_without_improvement += 1
-                            else:
-                                if current_score < self.best_score:
-                                    self.best_score = current_score
-                                    self.rounds_without_improvement = 0
-                                else:
-                                    self.rounds_without_improvement += 1
-                        
                         # Print progress every 10 seconds
                         if current_time - self.last_print_time >= self.print_interval:
                             # Handle different evaluation result formats
                             train_score = "N/A"
                             val_score = "N/A"
+                            metric_display_name = self.eval_metric.upper()
                             
-                            if evals_log:
-                                # Try to get training score
-                                if 'validation_0' in evals_log and evals_log['validation_0']:
+                            try:
+                                if evals_log and 'validation_0' in evals_log and evals_log['validation_0']:
                                     first_metric = list(evals_log['validation_0'].keys())[0]
                                     train_score = f"{evals_log['validation_0'][first_metric][-1]:8.4f}"
+                                    metric_display_name = first_metric.upper()
                                 
-                                # Try to get validation score
-                                if 'validation_1' in evals_log and evals_log['validation_1']:
+                                if evals_log and 'validation_1' in evals_log and evals_log['validation_1']:
                                     first_metric = list(evals_log['validation_1'].keys())[0]
                                     val_score = f"{evals_log['validation_1'][first_metric][-1]:8.4f}"
-                                    metric_display_name = first_metric.upper()
-                                else:
-                                    metric_display_name = self.eval_metric.upper()
-                            else:
-                                metric_display_name = self.eval_metric.upper()
+                                    
+                                    # Update best score and improvement tracking
+                                    current_score = evals_log['validation_1'][first_metric][-1]
+                                    if self.is_higher_better:
+                                        if current_score > self.best_score:
+                                            self.best_score = current_score
+                                            self.rounds_without_improvement = 0
+                                        else:
+                                            self.rounds_without_improvement += 1
+                                    else:
+                                        if current_score < self.best_score:
+                                            self.best_score = current_score
+                                            self.rounds_without_improvement = 0
+                                        else:
+                                            self.rounds_without_improvement += 1
+                            except Exception as e:
+                                # If anything goes wrong with metric extraction, just continue
+                                pass
                             
-                            print(f"   📊 Iteration {iteration:4d} | Train {metric_display_name}: {train_score} | Val {metric_display_name}: {val_score} | GPU: {monitor_gpu_utilization()}")
+                            print(f"   📊 Iteration {iteration:4d} | Train {metric_display_name}: {train_score} | Val {metric_display_name}: {val_score}")
                             self.last_print_time = current_time
                         
-                        # Custom early stopping logic: stop only if we've reached max iterations
-                        # OR if we've gone 2000 rounds without improvement (which is very generous)
+                        # Stop if we've reached max iterations or no improvement
                         if iteration >= self.max_iterations:
                             print(f"   🛑 Stopping at maximum iterations: {self.max_iterations}")
-                            return True  # Stop training
+                            return True
                         elif self.rounds_without_improvement >= self.max_rounds_without_improvement:
                             print(f"   🛑 Stopping after {self.max_rounds_without_improvement} rounds without improvement")
-                            return True  # Stop training
+                            return True
                         
-                        return False  # Continue training
+                        return False
                 
                 progress_callback = ProgressCallback(fold_idx, n_folds, fold_model.eval_metric)
                 callbacks_list = [progress_callback]
@@ -781,30 +760,32 @@ def fitPlotAndPredict(X_train, y_train, X_test, model, datasetName, xTransform, 
                 use_verbose = 100  # Show progress every 100 iterations
             
             try:
-                # Temporarily disable built-in early stopping since we're using custom logic
-                original_early_stopping = fold_model.early_stopping_rounds
-                fold_model.early_stopping_rounds = None
+                # First try with custom callback
+                if callbacks_list:
+                    try:
+                        fold_model.fit(
+                            X_fold_train, y_fold_train,
+                            eval_set=[(X_fold_train, y_fold_train), (X_fold_val, y_fold_val)],
+                            callbacks=callbacks_list,
+                            verbose=use_verbose
+                        )
+                    except Exception as e:
+                        print(f"   ⚠️  Custom callback failed ({type(e).__name__}), trying standard training...")
+                        callbacks_list = None
+                        use_verbose = 100
                 
-                fold_model.fit(
-                    X_fold_train, y_fold_train,
-                    eval_set=[(X_fold_train, y_fold_train), (X_fold_val, y_fold_val)],
-                    callbacks=callbacks_list,
-                    verbose=use_verbose
-                )
-                
-                # Restore original early stopping setting
-                fold_model.early_stopping_rounds = original_early_stopping
+                # If custom callback failed or wasn't available, try standard training
+                if not callbacks_list:
+                    fold_model.fit(
+                        X_fold_train, y_fold_train,
+                        eval_set=[(X_fold_train, y_fold_train), (X_fold_val, y_fold_val)],
+                        verbose=use_verbose
+                    )
                 
             except Exception as e:
                 # Ultimate fallback - train without evaluation set
-                print(f"   ⚠️  Callback training failed ({type(e).__name__}), using simple training...")
+                print(f"   ⚠️  Standard training failed ({type(e).__name__}), using simple training...")
                 fold_model.fit(X_fold_train, y_fold_train, verbose=use_verbose)
-            
-        else:
-            # Standard model fitting for other models
-            print(f"⚡ Training {model_type}...")
-            logger.info("Standard model fitting")
-            fold_model.fit(X_fold_train, y_fold_train)
         
         training_time = time.time() - training_start
         print(f"⏱️  Training completed in {training_time:.1f} seconds")
