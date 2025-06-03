@@ -428,7 +428,7 @@ def select_top_k_features(file_path, target_col, k, chunksize=10000):
     
     return top_features
 
-def create_component_features(input_file, output_file, target_col, n_components=10, chunksize=10000, keep_original=True):
+def create_component_features(input_file, output_file, target_col, feature_columns=None, n_components=10, chunksize=10000, keep_original=True):
     """
     Creates principal component features from a large dataset and writes the result to a CSV.
     
@@ -436,6 +436,7 @@ def create_component_features(input_file, output_file, target_col, n_components=
         input_file (str): Path to input CSV file.
         output_file (str): Path to output CSV file.
         target_col (str): Name of the target column.
+        feature_columns (list): List of feature column names to use for PCA. If None, uses all columns except target.
         n_components (int): Number of principal components to create.
         chunksize (int): Number of rows per processing chunk.
         keep_original (bool): Whether to keep original features in the output.
@@ -443,11 +444,11 @@ def create_component_features(input_file, output_file, target_col, n_components=
     logger.info(f"Starting PCA component creation: {n_components} components from {input_file}")
     print(f"🧮 Creating {n_components} PCA components...")
     
-    # First pass: Compute global mean and standard deviation
+    # First pass: Determine feature columns and compute global mean and standard deviation
     print("   📊 Pass 1: Computing global statistics...")
     logger.info("PCA Pass 1: Computing global mean and standard deviation")
     
-    feature_columns = None
+    first_chunk = True
     n_samples = 0
     sum_x = None
     sum_x2 = None
@@ -455,13 +456,24 @@ def create_component_features(input_file, output_file, target_col, n_components=
 
     for chunk in pd.read_csv(input_file, chunksize=chunksize):
         chunk_count += 1
-        if feature_columns is None:
-            feature_columns = [col for col in chunk.columns if col != target_col]
+        
+        if first_chunk:
+            if feature_columns is None:
+                # Use all columns except target
+                feature_columns = [col for col in chunk.columns if col != target_col]
+            else:
+                # Validate that specified columns exist
+                missing_cols = [col for col in feature_columns if col not in chunk.columns]
+                if missing_cols:
+                    logger.error(f"Missing columns in data: {missing_cols}")
+                    raise ValueError(f"Specified feature columns not found in data: {missing_cols}")
+            
             n_features = len(feature_columns)
             sum_x = np.zeros(n_features)
             sum_x2 = np.zeros(n_features)
-            logger.info(f"PCA: Found {n_features} feature columns")
-            print(f"      Found {n_features} features")
+            logger.info(f"PCA: Using {n_features} feature columns: {feature_columns[:10]}{'...' if len(feature_columns) > 10 else ''}")
+            print(f"      Using {n_features} features for PCA")
+            first_chunk = False
         
         if chunk_count % 10 == 0:
             print(f"      Processing chunk {chunk_count}...")
@@ -527,8 +539,10 @@ def create_component_features(input_file, output_file, target_col, n_components=
         components_df = pd.DataFrame(components, columns=comp_cols)
         
         if not keep_original:
+            # Keep only target and PCA components
             chunk = chunk[[target_col]].join(components_df)
         else:
+            # Keep all original columns plus PCA components
             chunk = pd.concat([chunk, components_df], axis=1)
         
         chunk.to_csv(output_file, mode='a', header=first_chunk, index=False)
@@ -611,12 +625,18 @@ print("   💾 Saving training data for feature enhancement...")
 logger.info("Saving training data to temporary file for feature enhancement")
 X_train.to_csv(temp_train_file, index=False)
 
+# Define feature columns for PCA (exclude timestamp and target)
+pca_feature_columns = [col for col in X_train.columns if col not in ['timestamp', target]]
+logger.info(f"PCA will use {len(pca_feature_columns)} feature columns (excluding timestamp and target)")
+print(f"   🎯 Using {len(pca_feature_columns)} features for PCA (excluding timestamp)")
+
 # Create PCA components (keep original features)
 logger.info("Creating PCA components for feature enhancement")
 create_component_features(
     input_file=temp_train_file, 
     output_file=temp_enhanced_train_file, 
-    target_col=target, 
+    target_col=target,
+    feature_columns=pca_feature_columns,  # Specify which columns to use for PCA
     n_components=20,  # Create 20 PCA components
     chunksize=5000,
     keep_original=True
