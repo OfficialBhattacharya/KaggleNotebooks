@@ -428,128 +428,153 @@ def select_top_k_features(file_path, target_col, k, chunksize=10000):
     
     return top_features
 
-def create_component_features(input_file, output_file, target_col, feature_columns=None, n_components=10, chunksize=10000, keep_original=True):
+def create_component_features(input_file, output_file, target_col, feature_columns=None, n_components=5, chunksize=50000, keep_original=True):
     """
     Creates principal component features from a large dataset and writes the result to a CSV.
+    Optimized version with faster processing and better memory management.
     
     Args:
         input_file (str): Path to input CSV file.
         output_file (str): Path to output CSV file.
         target_col (str): Name of the target column.
         feature_columns (list): List of feature column names to use for PCA. If None, uses all columns except target.
-        n_components (int): Number of principal components to create.
-        chunksize (int): Number of rows per processing chunk.
+        n_components (int): Number of principal components to create (default: 5).
+        chunksize (int): Number of rows per processing chunk (default: 50000).
         keep_original (bool): Whether to keep original features in the output.
     """
-    logger.info(f"Starting PCA component creation: {n_components} components from {input_file}")
-    print(f"🧮 Creating {n_components} PCA components...")
+    logger.info(f"Starting optimized PCA component creation: {n_components} components from {input_file}")
+    print(f"\n🚀 Creating {n_components} PCA components (optimized version)...")
     
-    # First pass: Determine feature columns and compute global mean and standard deviation
-    print("   📊 Pass 1: Computing global statistics...")
-    logger.info("PCA Pass 1: Computing global mean and standard deviation")
+    # Initialize memory tracking
+    process = psutil.Process(os.getpid())
+    initial_memory = process.memory_info().rss / 1024 / 1024
+    print(f"   💾 Initial memory usage: {initial_memory:.1f} MB")
+    
+    # First pass: Determine feature columns and compute statistics
+    print("   📊 Pass 1/3: Computing global statistics...")
+    logger.info("PCA Pass 1: Computing global statistics")
     
     first_chunk = True
     n_samples = 0
-    sum_x = None
-    sum_x2 = None
+    running_mean = None
+    running_var = None
     chunk_count = 0
-
+    total_chunks = sum(1 for _ in pd.read_csv(input_file, chunksize=chunksize))
+    
+    print(f"      Total chunks to process: {total_chunks}")
+    
     for chunk in pd.read_csv(input_file, chunksize=chunksize):
         chunk_count += 1
         
         if first_chunk:
             if feature_columns is None:
-                # Use all columns except target
                 feature_columns = [col for col in chunk.columns if col != target_col]
-            else:
-                # Validate that specified columns exist
-                missing_cols = [col for col in feature_columns if col not in chunk.columns]
-                if missing_cols:
-                    logger.error(f"Missing columns in data: {missing_cols}")
-                    raise ValueError(f"Specified feature columns not found in data: {missing_cols}")
             
             n_features = len(feature_columns)
-            sum_x = np.zeros(n_features)
-            sum_x2 = np.zeros(n_features)
-            logger.info(f"PCA: Using {n_features} feature columns: {feature_columns[:10]}{'...' if len(feature_columns) > 10 else ''}")
-            print(f"      Using {n_features} features for PCA")
+            running_mean = np.zeros(n_features)
+            running_var = np.zeros(n_features)
+            print(f"      Using {n_features} features")
+            logger.info(f"Using {n_features} features for PCA")
             first_chunk = False
         
-        if chunk_count % 10 == 0:
-            print(f"      Processing chunk {chunk_count}...")
-            logger.info(f"PCA Pass 1: processing chunk {chunk_count}")
+        if chunk_count % 5 == 0:
+            progress = (chunk_count / total_chunks) * 100
+            print(f"      ⏳ Progress: {progress:.1f}% (chunk {chunk_count}/{total_chunks})")
+            logger.info(f"Pass 1: Processing chunk {chunk_count}/{total_chunks}")
         
-        X_chunk = chunk[feature_columns].values.astype(np.float64)
-        n_chunk = X_chunk.shape[0]
-        n_samples += n_chunk
-        sum_x += np.sum(X_chunk, axis=0)
-        sum_x2 += np.sum(X_chunk ** 2, axis=0)
+        X_chunk = chunk[feature_columns].values.astype(np.float32)  # Use float32 for memory efficiency
+        chunk_size = X_chunk.shape[0]
+        
+        # Update running statistics using Welford's online algorithm
+        if n_samples == 0:
+            running_mean = np.mean(X_chunk, axis=0)
+            running_var = np.var(X_chunk, axis=0)
+        else:
+            chunk_mean = np.mean(X_chunk, axis=0)
+            chunk_var = np.var(X_chunk, axis=0)
+            delta = chunk_mean - running_mean
+            running_mean += delta * chunk_size / (n_samples + chunk_size)
+            running_var = (n_samples * running_var + chunk_size * chunk_var + 
+                         delta * delta * n_samples * chunk_size / (n_samples + chunk_size)) / (n_samples + chunk_size)
+        
+        n_samples += chunk_size
+        
+        # Clear memory
+        del X_chunk
+        gc.collect()
     
-    if n_samples == 0:
-        logger.error("No data found in the input file for PCA")
-        raise ValueError("No data found in the input file.")
+    global_std = np.sqrt(running_var)
+    global_std[global_std == 0] = 1.0
     
-    global_mean = sum_x / n_samples
-    global_std = np.sqrt((sum_x2 / n_samples) - (global_mean ** 2))
-    global_std[global_std == 0] = 1.0  # Avoid division by zero
+    current_memory = process.memory_info().rss / 1024 / 1024
+    print(f"      💾 Memory usage after Pass 1: {current_memory:.1f} MB")
+    print(f"      ✅ Pass 1 completed: {n_samples:,} samples processed")
     
-    logger.info(f"PCA Pass 1 completed: {n_samples} samples, {len(feature_columns)} features")
-    print(f"      ✅ Pass 1 completed: {n_samples} samples")
-
-    # Initialize Incremental PCA
-    print("   🔧 Pass 2: Training PCA model...")
+    # Initialize Incremental PCA with reduced components
+    print("   🔧 Pass 2/3: Training PCA model...")
     logger.info("PCA Pass 2: Training Incremental PCA")
     
     ipca = IncrementalPCA(n_components=n_components)
     chunk_count = 0
     
-    # Second pass: Train PCA incrementally
     for chunk in pd.read_csv(input_file, chunksize=chunksize):
         chunk_count += 1
-        if chunk_count % 10 == 0:
-            print(f"      Training on chunk {chunk_count}...")
-            logger.info(f"PCA Pass 2: training on chunk {chunk_count}")
+        if chunk_count % 5 == 0:
+            progress = (chunk_count / total_chunks) * 100
+            print(f"      ⏳ Progress: {progress:.1f}% (chunk {chunk_count}/{total_chunks})")
+            logger.info(f"Pass 2: Processing chunk {chunk_count}/{total_chunks}")
         
-        X_chunk = chunk[feature_columns].values.astype(np.float64)
-        X_scaled = (X_chunk - global_mean) / global_std
+        X_chunk = chunk[feature_columns].values.astype(np.float32)
+        X_scaled = (X_chunk - running_mean) / global_std
         ipca.partial_fit(X_scaled)
+        
+        del X_chunk, X_scaled
+        gc.collect()
     
-    logger.info(f"PCA training completed: explained variance ratio = {ipca.explained_variance_ratio_[:5]}")
-    print(f"      ✅ PCA training completed")
-    print(f"      📈 Top 5 components explain: {[f'{r:.3f}' for r in ipca.explained_variance_ratio_[:5]]}")
+    explained_var = [f"{var:.3f}" for var in ipca.explained_variance_ratio_]
+    print(f"      📈 Explained variance ratios: {explained_var}")
+    logger.info(f"PCA components explain: {explained_var} of variance")
+    
+    current_memory = process.memory_info().rss / 1024 / 1024
+    print(f"      💾 Memory usage after Pass 2: {current_memory:.1f} MB")
     
     # Third pass: Transform data and write to output
-    print("   💾 Pass 3: Transforming data and saving...")
-    logger.info("PCA Pass 3: Transforming data and writing to output")
+    print("   💾 Pass 3/3: Transforming data and saving...")
+    logger.info("PCA Pass 3: Transforming and saving data")
     
     first_chunk = True
     chunk_count = 0
     
     for chunk in pd.read_csv(input_file, chunksize=chunksize):
         chunk_count += 1
-        if chunk_count % 10 == 0:
-            print(f"      Transforming chunk {chunk_count}...")
-            logger.info(f"PCA Pass 3: transforming chunk {chunk_count}")
+        if chunk_count % 5 == 0:
+            progress = (chunk_count / total_chunks) * 100
+            print(f"      ⏳ Progress: {progress:.1f}% (chunk {chunk_count}/{total_chunks})")
+            logger.info(f"Pass 3: Processing chunk {chunk_count}/{total_chunks}")
         
-        X_chunk = chunk[feature_columns].values.astype(np.float64)
-        X_scaled = (X_chunk - global_mean) / global_std
+        X_chunk = chunk[feature_columns].values.astype(np.float32)
+        X_scaled = (X_chunk - running_mean) / global_std
         components = ipca.transform(X_scaled)
         
         comp_cols = [f'pca_{i}' for i in range(components.shape[1])]
         components_df = pd.DataFrame(components, columns=comp_cols)
         
         if not keep_original:
-            # Keep only target and PCA components
-            chunk = chunk[[target_col]].join(components_df)
+            output_chunk = chunk[[target_col]].join(components_df)
         else:
-            # Keep all original columns plus PCA components
-            chunk = pd.concat([chunk, components_df], axis=1)
+            output_chunk = pd.concat([chunk, components_df], axis=1)
         
-        chunk.to_csv(output_file, mode='a', header=first_chunk, index=False)
+        output_chunk.to_csv(output_file, mode='a', header=first_chunk, index=False)
         first_chunk = False
+        
+        del X_chunk, X_scaled, components, components_df, output_chunk
+        gc.collect()
     
-    logger.info(f"PCA component creation completed: output saved to {output_file}")
+    final_memory = process.memory_info().rss / 1024 / 1024
+    memory_change = final_memory - initial_memory
+    print(f"\n   💾 Final memory usage: {final_memory:.1f} MB (change: {memory_change:+.1f} MB)")
     print(f"   ✅ PCA components saved to {output_file}")
+    logger.info(f"PCA completed: {n_components} components saved to {output_file}")
 
 # Check system resources
 print("🔍 Checking system resources...")
