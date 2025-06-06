@@ -340,86 +340,56 @@ def add_features(df):
     
     return features_df
 
-def select_top_k_features(file_path, target_col, k, chunksize=10000):
+def select_top_k_features_fast(X_data, y_data, feature_columns, k):
     """
-    Select top k features based on Pearson correlation with the target variable.
+    Fast in-memory feature selection based on absolute correlation with target.
     
     Args:
-        file_path (str): Path to CSV file containing the dataset.
-        target_col (str): Name of the target column.
-        k (int): Number of top features to select.
-        chunksize (int): Number of rows per chunk for processing.
+        X_data: DataFrame with features
+        y_data: Series with target values  
+        feature_columns: List of feature column names
+        k: Number of top features to select
     
     Returns:
-        list: Top k feature names.
+        list: Top k feature names
     """
-    logger.info(f"Starting feature selection: selecting top {k} features from {file_path}")
-    print(f"🔍 Selecting top {k} features based on correlation with {target_col}...")
+    logger.info(f"Starting fast feature selection: selecting top {k} features")
+    print(f"🚀 Fast feature selection: selecting top {k} features...")
     
-    # Initialize statistics
-    n = 0
-    sum_y = 0.0
-    sum_y2 = 0.0
-    stats = {}
+    # Ensure all features are numeric
+    print("   🔧 Ensuring numeric data types...")
+    X_numeric = X_data[feature_columns].copy()
     
-    # Process data in chunks
-    chunk_count = 0
-    for chunk in pd.read_csv(file_path, chunksize=chunksize):
-        chunk_count += 1
-        chunk_size = len(chunk)
-        n += chunk_size
-        
-        if chunk_count % 10 == 0:
-            print(f"   Processing chunk {chunk_count}, total samples: {n}")
-            logger.info(f"Feature selection: processed chunk {chunk_count}, total samples: {n}")
-        
-        # Update target statistics
-        y_vals = chunk[target_col].values
-        sum_y += np.sum(y_vals)
-        sum_y2 += np.sum(y_vals ** 2)
-        
-        # Update feature statistics
-        features = [col for col in chunk.columns if col != target_col]
-        for feat in features:
-            x_vals = chunk[feat].values
-            if feat not in stats:
-                stats[feat] = {'sum_x': 0.0, 'sum_x2': 0.0, 'sum_xy': 0.0}
-            stats[feat]['sum_x'] += np.sum(x_vals)
-            stats[feat]['sum_x2'] += np.sum(x_vals ** 2)
-            stats[feat]['sum_xy'] += np.sum(x_vals * y_vals)
+    # Convert to numeric, coercing errors to NaN
+    for col in feature_columns:
+        X_numeric[col] = pd.to_numeric(X_numeric[col], errors='coerce')
     
-    # Handle edge case: no data processed
-    if n == 0:
-        logger.warning("No data processed during feature selection")
-        return []
+    # Fill any remaining NaN with 0
+    X_numeric = X_numeric.fillna(0)
     
-    logger.info(f"Feature selection: processed {n} total samples across {chunk_count} chunks")
-    print(f"   📊 Processed {n} samples, calculating correlations...")
+    # Calculate correlations using pandas (much faster)
+    print("   📊 Computing correlations with target...")
+    logger.info("Computing correlations with vectorized operations")
     
-    # Compute correlation for each feature
     correlations = {}
-    for feat, vals in stats.items():
-        sum_x = vals['sum_x']
-        sum_x2 = vals['sum_x2']
-        sum_xy = vals['sum_xy']
-        
-        # Calculate numerator and denominators
-        numerator = n * sum_xy - sum_x * sum_y
-        denom_x = n * sum_x2 - sum_x ** 2
-        denom_y = n * sum_y2 - sum_y ** 2
-        
-        # Avoid division by zero
-        if denom_x <= 0 or denom_y <= 0:
-            corr = 0.0
-        else:
-            corr = numerator / (np.sqrt(denom_x) * np.sqrt(denom_y))
-        correlations[feat] = abs(corr)
+    y_numeric = pd.to_numeric(y_data, errors='coerce').fillna(0)
+    
+    # Use pandas correlation which is optimized
+    correlation_series = X_numeric.corrwith(y_numeric)
+    
+    # Convert to absolute values and handle NaN
+    for feature in feature_columns:
+        corr_val = correlation_series.get(feature, 0.0)
+        if pd.isna(corr_val):
+            corr_val = 0.0
+        correlations[feature] = abs(corr_val)
     
     # Select top k features
+    print("   🎯 Selecting top features...")
     top_features = sorted(correlations.keys(), key=lambda x: correlations[x], reverse=True)[:k]
     
     logger.info(f"Feature selection completed: selected {len(top_features)} features")
-    print(f"   ✅ Selected top {len(top_features)} features")
+    print(f"   ✅ Selected {len(top_features)} features")
     
     # Log top 10 correlations for debugging
     top_10_correlations = [(feat, correlations[feat]) for feat in top_features[:10]]
@@ -428,9 +398,10 @@ def select_top_k_features(file_path, target_col, k, chunksize=10000):
     
     return top_features
 
-def create_component_features(input_file, output_file, target_col, feature_columns=None, n_components=5, chunksize=50000, keep_original=True):
+def create_component_features(input_file, output_file, target_col, feature_columns=None, n_components=5, chunksize=50000):
     """
     Creates principal component features from a large dataset and writes the result to a CSV.
+    Only saves timestamp/ID, target column (if present), and PCA components.
     Optimized version with faster processing and better memory management.
     
     Args:
@@ -440,7 +411,6 @@ def create_component_features(input_file, output_file, target_col, feature_colum
         feature_columns (list): List of feature column names to use for PCA. If None, uses all columns except target.
         n_components (int): Number of principal components to create (default: 5).
         chunksize (int): Number of rows per processing chunk (default: 50000).
-        keep_original (bool): Whether to keep original features in the output.
     """
     logger.info(f"Starting optimized PCA component creation: {n_components} components from {input_file}")
     print(f"\n🚀 Creating {n_components} PCA components (optimized version)...")
@@ -460,6 +430,7 @@ def create_component_features(input_file, output_file, target_col, feature_colum
     running_var = None
     chunk_count = 0
     total_chunks = sum(1 for _ in pd.read_csv(input_file, chunksize=chunksize))
+    id_col = None  # To store ID column name if present
     
     print(f"      Total chunks to process: {total_chunks}")
     
@@ -467,14 +438,26 @@ def create_component_features(input_file, output_file, target_col, feature_colum
         chunk_count += 1
         
         if first_chunk:
+            # Determine ID column (either 'timestamp' or 'ID')
+            if 'timestamp' in chunk.columns:
+                id_col = 'timestamp'
+            elif 'ID' in chunk.columns:
+                id_col = 'ID'
+            
             if feature_columns is None:
-                feature_columns = [col for col in chunk.columns if col != target_col]
+                # Exclude target and ID columns from features
+                exclude_cols = [target_col] if target_col in chunk.columns else []
+                if id_col:
+                    exclude_cols.append(id_col)
+                feature_columns = [col for col in chunk.columns if col not in exclude_cols]
             
             n_features = len(feature_columns)
             running_mean = np.zeros(n_features)
             running_var = np.zeros(n_features)
             print(f"      Using {n_features} features")
-            logger.info(f"Using {n_features} features for PCA")
+            print(f"      ID column: {id_col}")
+            print(f"      Target column: {target_col if target_col in chunk.columns else 'Not present'}")
+            logger.info(f"Using {n_features} features for PCA, ID column: {id_col}")
             first_chunk = False
         
         if chunk_count % 5 == 0:
@@ -559,10 +542,22 @@ def create_component_features(input_file, output_file, target_col, feature_colum
         comp_cols = [f'pca_{i}' for i in range(components.shape[1])]
         components_df = pd.DataFrame(components, columns=comp_cols)
         
-        if not keep_original:
-            output_chunk = chunk[[target_col]].join(components_df)
-        else:
-            output_chunk = pd.concat([chunk, components_df], axis=1)
+        # Create output with only ID/timestamp, target (if present), and PCA components
+        output_columns = []
+        output_chunk = pd.DataFrame()
+        
+        # Add ID column if present
+        if id_col and id_col in chunk.columns:
+            output_chunk[id_col] = chunk[id_col]
+            output_columns.append(id_col)
+        
+        # Add target column if present
+        if target_col in chunk.columns:
+            output_chunk[target_col] = chunk[target_col]
+            output_columns.append(target_col)
+        
+        # Add PCA components
+        output_chunk = pd.concat([output_chunk, components_df], axis=1)
         
         output_chunk.to_csv(output_file, mode='a', header=first_chunk, index=False)
         first_chunk = False
@@ -574,6 +569,7 @@ def create_component_features(input_file, output_file, target_col, feature_colum
     memory_change = final_memory - initial_memory
     print(f"\n   💾 Final memory usage: {final_memory:.1f} MB (change: {memory_change:+.1f} MB)")
     print(f"   ✅ PCA components saved to {output_file}")
+    print(f"   📊 Output contains: {id_col if id_col else 'No ID'}, {'target' if target_col else 'No target'}, {n_components} PCA components")
     logger.info(f"PCA completed: {n_components} components saved to {output_file}")
 
 # Check system resources
@@ -619,104 +615,241 @@ print("🔧 Adding derived features...")
 X_train = pd.concat([add_features(X_train), X_train], axis=1)
 X_test = pd.concat([add_features(X_test), X_test], axis=1)
 
-features = [
-    'bid_qty', 'ask_qty', 'buy_qty', 'sell_qty', 'volume', 'trade_imbalance', 
-    'total_trades', 'volume_per_trade', 'selling_pressure', 'ask_liquidity_ratio',
-    'order_imbalance', 'depth_imbalance', 'market_activity', 'activity_concentration',
-    'info_arrival_rate', 'market_making_intensity', 'effective_spread_proxy', 'order_flow_imbalance_ewm',
-    'buy_volume_product', 'sell_volume_product', 'volume_liquidity_ratio', 'effective_spread_proxy',
-    'X2', 'X10', 'X11', 'X13', 'X14', 'X18', 'X19', 'X20', 'X26', 'X27', 'X40', 
-    'X42', 'X60', 'X63', 'X64', 'X81', 'X82', 'X86', 'X87', 'X88', 'X99', 'X100',
-    'X119', 'X120', 'X124', 'X125', 'X135', 'X143', 'X145', 'X157', 'X160', 'X161', 
-    'X264', 'X265', 'X267', 'X269', 'X270', 'X289', 'X309', 'X314', 'X320', 'X325',
-    'X331', 'X342', 'X480', 'X511', 'X534', 'X579', 'X580', 'X582', 'X602', 'X612',
-    'X614', 'X764', 'X782', 'X808', 'X811', 'X863', 'X865', 'X866', 'X868', 'X877'
-]
-regimeFeatures_HMM = ['info_arrival_rate', 'market_making_intensity', 'effective_spread_proxy', 'order_flow_imbalance_ewm']
-
-regimeFeatures_CLF = ['bid_qty', 'ask_qty', 'buy_qty', 'sell_qty', 'volume', 'trade_imbalance']
-
-X_train, X_test = X_train[features+['timestamp']+[target]], X_test[features+['ID']]
-
 # --- Step 2.5: Create Enhanced Features with PCA and Feature Selection ---
 logger.info("Creating enhanced features with PCA and feature selection...")
-print("🚀 Creating enhanced features with PCA and feature selection...")
+print("🚀 Creating two enhanced datasets: PCA components and Top 500 features...")
 
-# Save current data to temporary files for processing
-temp_train_file = 'temp_train_features.csv'
-temp_enhanced_train_file = 'temp_enhanced_train.csv'
+# Define feature lists for regime detection
+regimeFeatures_HMM = ['info_arrival_rate', 'market_making_intensity', 'effective_spread_proxy', 'order_flow_imbalance_ewm']
+regimeFeatures_CLF = ['bid_qty', 'ask_qty', 'buy_qty', 'sell_qty', 'volume', 'trade_imbalance']
 
-print("   💾 Saving training data for feature enhancement...")
-logger.info("Saving training data to temporary file for feature enhancement")
-X_train.to_csv(temp_train_file, index=False)
+# Get all available features (excluding timestamp/ID and target)
+all_features = [col for col in X_train.columns if col not in ['timestamp', target]]
+print(f"   📊 Total available features: {len(all_features)}")
+logger.info(f"Total available features for processing: {len(all_features)}")
+
+# --- Comprehensive Data Cleaning ---
+print("\n🧹 Comprehensive data cleaning...")
+logger.info("Starting comprehensive data cleaning")
+
+# Check for NaN and infinite values in training data
+print("   🔍 Checking training data...")
+train_nan_count = X_train[all_features].isna().sum().sum()
+train_inf_count = np.isinf(X_train[all_features].select_dtypes(include=[np.number]).values).sum()
+print(f"      - Training NaN values: {train_nan_count}")
+print(f"      - Training infinite values: {train_inf_count}")
+logger.info(f"Training data: {train_nan_count} NaN, {train_inf_count} infinite values")
+
+# Check for NaN and infinite values in test data
+print("   🔍 Checking test data...")
+test_nan_count = X_test[all_features].isna().sum().sum()
+test_inf_count = np.isinf(X_test[all_features].select_dtypes(include=[np.number]).values).sum()
+print(f"      - Test NaN values: {test_nan_count}")
+print(f"      - Test infinite values: {test_inf_count}")
+logger.info(f"Test data: {test_nan_count} NaN, {test_inf_count} infinite values")
+
+# Clean training data
+print("   🔧 Cleaning training data...")
+# Replace infinite values with NaN first
+X_train[all_features] = X_train[all_features].replace([np.inf, -np.inf], np.nan)
+
+# Fill NaN values with column medians (more robust than mean)
+for col in all_features:
+    if X_train[col].isna().any():
+        median_val = X_train[col].median()
+        if pd.isna(median_val):  # If median is also NaN, use 0
+            median_val = 0.0
+        X_train[col] = X_train[col].fillna(median_val)
+        logger.info(f"Filled NaN in training column {col} with {median_val}")
+
+# Clean test data using training data statistics
+print("   🔧 Cleaning test data...")
+# Replace infinite values with NaN first
+X_test[all_features] = X_test[all_features].replace([np.inf, -np.inf], np.nan)
+
+# Fill NaN values with corresponding training medians
+for col in all_features:
+    if X_test[col].isna().any():
+        # Use the same median from training data for consistency
+        median_val = X_train[col].median()
+        if pd.isna(median_val):  # If median is still NaN, use 0
+            median_val = 0.0
+        X_test[col] = X_test[col].fillna(median_val)
+        logger.info(f"Filled NaN in test column {col} with training median {median_val}")
+
+# Final verification
+print("   ✅ Final verification...")
+final_train_nan = X_train[all_features].isna().sum().sum()
+final_train_inf = np.isinf(X_train[all_features].select_dtypes(include=[np.number]).values).sum()
+final_test_nan = X_test[all_features].isna().sum().sum()
+final_test_inf = np.isinf(X_test[all_features].select_dtypes(include=[np.number]).values).sum()
+
+print(f"      - Final training NaN: {final_train_nan}, infinite: {final_train_inf}")
+print(f"      - Final test NaN: {final_test_nan}, infinite: {final_test_inf}")
+logger.info(f"Final cleanup - Train: {final_train_nan} NaN, {final_train_inf} inf; Test: {final_test_nan} NaN, {final_test_inf} inf")
+
+if final_train_nan > 0 or final_train_inf > 0 or final_test_nan > 0 or final_test_inf > 0:
+    print("      ⚠️ Warning: Still have NaN/infinite values, applying final fallback...")
+    # Fallback: replace any remaining NaN/inf with 0
+    X_train[all_features] = X_train[all_features].fillna(0).replace([np.inf, -np.inf], 0)
+    X_test[all_features] = X_test[all_features].fillna(0).replace([np.inf, -np.inf], 0)
+    logger.warning("Applied fallback: replaced remaining NaN/inf with 0")
+
+print("   🎉 Data cleaning completed!")
+logger.info("Data cleaning completed successfully")
+
+# --- Dataset 1: PCA Components Dataset ---
+print("\n🔧 Creating Dataset 1: PCA Components...")
+logger.info("Creating PCA components dataset")
 
 # Define feature columns for PCA (exclude timestamp and target)
-pca_feature_columns = [col for col in X_train.columns if col not in ['timestamp', target]]
-logger.info(f"PCA will use {len(pca_feature_columns)} feature columns (excluding timestamp and target)")
-print(f"   🎯 Using {len(pca_feature_columns)} features for PCA (excluding timestamp)")
+pca_feature_columns = all_features
+logger.info(f"PCA will use {len(pca_feature_columns)} feature columns")
+print(f"   🎯 Using {len(pca_feature_columns)} features for PCA")
 
-# Create PCA components (keep original features)
-logger.info("Creating PCA components for feature enhancement")
-create_component_features(
-    input_file=temp_train_file, 
-    output_file=temp_enhanced_train_file, 
-    target_col=target,
-    feature_columns=pca_feature_columns,  # Specify which columns to use for PCA
-    n_components=20,  # Create 20 PCA components
-    chunksize=5000,
-    keep_original=True
+# Prepare data for PCA (directly from memory)
+print("   🔧 Preparing data for PCA processing...")
+X_train_features = X_train[pca_feature_columns].values.astype(np.float32)
+X_test_features = X_test[pca_feature_columns].values.astype(np.float32)
+
+# Fit and transform with Incremental PCA
+print("   🔧 Fitting PCA model...")
+logger.info("Fitting Incremental PCA on training data")
+ipca = IncrementalPCA(n_components=20)
+
+# Fit PCA on training data in chunks if needed
+chunk_size = 10000
+n_samples = X_train_features.shape[0]
+for i in range(0, n_samples, chunk_size):
+    end_idx = min(i + chunk_size, n_samples)
+    chunk = X_train_features[i:end_idx]
+    ipca.partial_fit(chunk)
+
+# Transform both datasets
+print("   🔄 Transforming datasets with PCA...")
+X_train_pca_components = ipca.transform(X_train_features)
+X_test_pca_components = ipca.transform(X_test_features)
+
+# Create PCA component column names
+pca_component_names = [f'pca_{i}' for i in range(20)]
+explained_var = [f"{var:.3f}" for var in ipca.explained_variance_ratio_]
+print(f"   📈 Explained variance ratios: {explained_var}")
+logger.info(f"PCA components explain: {explained_var} of variance")
+
+# Create final PCA datasets
+print("   💾 Creating PCA datasets...")
+pca_train_file = 'pca_train_dataset.csv'
+pca_test_file = 'pca_test_dataset.csv'
+
+# Train PCA dataset: timestamp + target + PCA components
+pca_train_df = pd.DataFrame(X_train_pca_components, columns=pca_component_names)
+pca_train_df.insert(0, 'timestamp', X_train['timestamp'].values)
+pca_train_df.insert(1, target, X_train[target].values)
+pca_train_df.to_csv(pca_train_file, index=False)
+
+# Test PCA dataset: ID + PCA components
+pca_test_df = pd.DataFrame(X_test_pca_components, columns=pca_component_names)
+pca_test_df.insert(0, 'ID', X_test['ID'].values)
+pca_test_df.to_csv(pca_test_file, index=False)
+
+print(f"   📊 PCA train dataset: {pca_train_df.shape}")
+print(f"   📊 PCA test dataset: {pca_test_df.shape}")
+print(f"   ✅ PCA datasets saved: {pca_train_file}, {pca_test_file}")
+logger.info(f"PCA datasets created - Train: {pca_train_df.shape}, Test: {pca_test_df.shape}")
+
+# Clean up PCA variables
+del X_train_features, X_test_features, X_train_pca_components, X_test_pca_components, pca_train_df, pca_test_df
+gc.collect()
+
+# --- Dataset 2: Top 500 Features Dataset ---
+print("\n🎯 Creating Dataset 2: Top 500 Features...")
+logger.info("Creating top 500 features dataset")
+
+# Select top 500 features from all available features (directly from memory)
+print(f"   📊 Selecting top 500 from {len(all_features)} available features...")
+
+# Use fast in-memory feature selection
+top_500_features = select_top_k_features_fast(
+    X_data=X_train, 
+    y_data=y_train, 
+    feature_columns=all_features,
+    k=min(500, len(all_features))
 )
 
-# Load enhanced data
-print("   📂 Loading enhanced training data...")
-logger.info("Loading enhanced training data with PCA components")
-X_train_enhanced = pd.read_csv(temp_enhanced_train_file)
+print(f"   ✅ Selected {len(top_500_features)} features (showing first 5): {top_500_features[:5]}")
+logger.info(f"Selected {len(top_500_features)} top features")
 
-# Select top 50 features for HMM training
-print("   🎯 Selecting top 50 features for HMM training...")
-logger.info("Selecting top 50 features for HMM training")
+# Create top 500 features datasets (directly from memory)
+top500_train_file = 'top500_train_dataset.csv'
+top500_test_file = 'top500_test_dataset.csv'
 
-# Create a temporary file with just the features we want to consider for selection
-hmm_features_file = 'temp_hmm_features.csv'
-hmm_candidate_features = regimeFeatures_HMM + [f'pca_{i}' for i in range(20)]  # Original HMM features + PCA components
-X_hmm_candidates = X_train_enhanced[hmm_candidate_features + [target]]
-X_hmm_candidates.to_csv(hmm_features_file, index=False)
+print("   💾 Creating top 500 features datasets...")
 
-# Select top 50 features
-top_50_features = select_top_k_features(
-    file_path=hmm_features_file, 
-    target_col=target, 
-    k=50, 
-    chunksize=5000
-)
+# For train data: timestamp, target, top 500 features
+train_top500_columns = ['timestamp', target] + top_500_features
+X_train_top500 = X_train[train_top500_columns]
+X_train_top500.to_csv(top500_train_file, index=False)
 
-logger.info(f"Selected top 50 features for HMM: {top_50_features[:10]}...")  # Log first 10
-print(f"   ✅ Selected top 50 features (showing first 5): {top_50_features[:5]}")
+# For test data: ID, top 500 features
+test_top500_columns = ['ID'] + top_500_features
+X_test_top500 = X_test[test_top500_columns]
+X_test_top500.to_csv(top500_test_file, index=False)
 
-# Update regime features for HMM with selected features
-regimeFeatures_HMM_enhanced = top_50_features
+print(f"   📊 Top 500 train dataset: {X_train_top500.shape}")
+print(f"   📊 Top 500 test dataset: {X_test_top500.shape}")
+logger.info(f"Top 500 datasets created - Train: {X_train_top500.shape}, Test: {X_test_top500.shape}")
 
-# Use enhanced training data
-X_train = X_train_enhanced
-logger.info(f"Enhanced training data shape: {X_train.shape}")
-print(f"   📊 Enhanced training data: {X_train.shape}")
+# --- Memory Cleanup ---
+print("\n🧹 Cleaning up memory...")
+logger.info("Starting memory cleanup")
 
-# Clean up temporary files
-import os
-try:
-    os.remove(temp_train_file)
-    os.remove(temp_enhanced_train_file)
-    os.remove(hmm_features_file)
-    logger.info("Temporary files cleaned up")
-except:
-    logger.warning("Could not clean up all temporary files")
+# Delete large intermediate dataframes
+del X_train_top500, X_test_top500
+gc.collect()
 
-# --- Step 3: Regime Detection with HMM ---
-logger.info("Starting regime detection with HMM using enhanced features...")
-print("🎲 Starting HMM-based regime detection with enhanced features...")
+print_memory_usage()
 
-# Prepare observation sequence (enhanced features + returns)
-observations = pd.concat([X_train[regimeFeatures_HMM_enhanced], y_train], axis=1)
+# --- Load Final Datasets for Processing ---
+print("\n📂 Loading final datasets for regime detection...")
+logger.info("Loading final datasets for regime detection")
+
+# Load PCA dataset for HMM training (will use PCA components + some original features)
+print("   📂 Loading PCA dataset for HMM...")
+X_train_pca_hmm = pd.read_csv(pca_train_file)
+logger.info(f"Loaded PCA dataset for HMM: {X_train_pca_hmm.shape}")
+
+# Load top 500 dataset for classifier training
+print("   📂 Loading top 500 training dataset...")
+X_train_top500_loaded = pd.read_csv(top500_train_file)
+logger.info(f"Loaded top 500 train dataset: {X_train_top500_loaded.shape}")
+
+# Update regime features for classifier (use original classifier features from top 500)
+regimeFeatures_CLF_enhanced = [f for f in regimeFeatures_CLF if f in X_train_top500_loaded.columns]
+
+print(f"   🌲 Classifier features: {len(regimeFeatures_CLF_enhanced)} original features")
+logger.info(f"Classifier feature set: {len(regimeFeatures_CLF_enhanced)} features")
+
+# Clean up original large dataframes
+del X_train, X_test
+gc.collect()
+
+print("   ✅ Memory cleanup completed")
+logger.info("Memory cleanup completed")
+print_memory_usage()
+
+# Use the loaded datasets for further processing
+X_train = X_train_top500_loaded  # Use top 500 dataset as main training data
+y_train = X_train[target]
+
+# Extract PCA components and target for observations
+pca_features_for_hmm = [f'pca_{i}' for i in range(20)]
+y_train_pca = X_train_pca_hmm[target]
+
+print(f"   🎯 Using {len(pca_features_for_hmm)} PCA components for HMM regime detection")
+logger.info(f"Using {len(pca_features_for_hmm)} PCA components for HMM")
+
+# Prepare observation sequence (PCA features + returns)
+observations = pd.concat([X_train_pca_hmm[pca_features_for_hmm], y_train_pca], axis=1)
 
 # Clean observations data to handle NaN and infinite values
 print("🧹 Cleaning observations data for HMM...")
@@ -771,7 +904,9 @@ logger.info(f"Standardized data: mean={observations.mean():.6f}, std={observatio
 logger.info("Fitting HMM model with balance checking...")
 model, predicted_regimes = fit_hmm_with_balance_check(observations)
 
-X_train['predicted_regime'] = predicted_regimes
+# Add predicted regimes to both datasets (PCA and top500)
+X_train_pca_hmm['predicted_regime'] = predicted_regimes
+X_train['predicted_regime'] = predicted_regimes  # Also add to main training dataset
 
 print(f"📊 Final regime distribution: {np.bincount(predicted_regimes)}")
 print(f"📈 Number of regimes detected: {len(np.unique(predicted_regimes))}")
@@ -781,10 +916,10 @@ logger.info(f"HMM regime distribution: {dict(enumerate(np.bincount(predicted_reg
 logger.info("Analyzing regime properties...")
 print("📈 Analyzing regime properties...")
 
-# Map HMM states to consistent regime numbering
+# Map HMM states to consistent regime numbering using PCA dataset
 regime_mapping = {}
 for regime_id in range(len(np.unique(predicted_regimes))):
-    regime_data = X_train[X_train['predicted_regime'] == regime_id]
+    regime_data = X_train_pca_hmm[X_train_pca_hmm['predicted_regime'] == regime_id]
     mean_return = regime_data[target].mean()
     std_return = regime_data[target].std()
     duration = len(regime_data)
@@ -796,27 +931,52 @@ for regime_id, (mean, std, dur) in regime_mapping.items():
     print(f"Regime {regime_id}: μ={mean:.6f}, σ={std:.6f}, duration={dur}s")
     logger.info(f"Regime {regime_id}: μ={mean:.6f}, σ={std:.6f}, duration={dur}s")
 
+# Clean up PCA HMM dataset to save memory
+del X_train_pca_hmm
+gc.collect()
+
 # --- Step 4: Train Regime Classifier ---
-logger.info("Training regime classifier with balance checking...")
-print("\n🌲 Training regime classifier with balance checking...")
-X_RegimeTrain = scaler.fit_transform(X_train[regimeFeatures_CLF])
-y_RegimeTrain = X_train['predicted_regime']
+logger.info("Training regime classifier with balance checking using PCA features...")
+print("\n🌲 Training regime classifier with balance checking using PCA features...")
+
+# Load PCA dataset again for classifier training (we deleted it earlier for memory)
+print("   📂 Reloading PCA dataset for classifier training...")
+X_train_pca_classifier = pd.read_csv(pca_train_file)
+logger.info(f"Reloaded PCA dataset for classifier: {X_train_pca_classifier.shape}")
+
+# Use PCA features (without target) for classifier training
+X_RegimeTrain = X_train_pca_classifier[pca_features_for_hmm].values
+y_RegimeTrain = X_train['predicted_regime']  # Use HMM predicted regimes as labels
+
+print(f"   🎯 Using {len(pca_features_for_hmm)} PCA components for classifier training")
+logger.info(f"Classifier training with {len(pca_features_for_hmm)} PCA features")
+
+# Standardize the PCA features for classifier
+scaler_classifier = StandardScaler()
+X_RegimeTrain_scaled = scaler_classifier.fit_transform(X_RegimeTrain)
 
 # Fit classifier with balance checking
-clf, best_auc, best_balance = fit_classifier_with_balance_check(X_RegimeTrain, y_RegimeTrain)
+clf, best_auc, best_balance = fit_classifier_with_balance_check(X_RegimeTrain_scaled, y_RegimeTrain)
 
 print(f"✅ Final classifier - ROC AUC: {best_auc:.4f}, Balance ratio: {best_balance:.4f}")
 logger.info(f"Final classifier performance: ROC AUC={best_auc:.4f}, Balance ratio={best_balance:.4f}")
 
 # --- Step 5.00: Predict Regimes for Train and Test Data ---
-logger.info("Predicting regimes for train and test data...")
-print("🔮 Predicting regimes for train and test data...")
+logger.info("Predicting regimes for train and test data using PCA features...")
+print("🔮 Predicting regimes for train and test data using PCA features...")
 
-# For training data (using classifier, not HMM directly)
-X_train['predicted_regime_Est'] = clf.predict(X_train[regimeFeatures_CLF])
+# For training data (using classifier with PCA features)
+X_train_pca_scaled = scaler_classifier.transform(X_train_pca_classifier[pca_features_for_hmm])
+X_train['predicted_regime_Est'] = clf.predict(X_train_pca_scaled)
 
-# For test data (only features available)
-X_test['predicted_regime_Est'] = clf.predict(X_test[regimeFeatures_CLF])
+# For test data (load the PCA test dataset)
+print("   📂 Loading PCA test dataset for regime prediction...")
+X_test_pca = pd.read_csv(pca_test_file)
+logger.info(f"Loaded PCA test dataset for prediction: {X_test_pca.shape}")
+
+# Predict regimes for test data using PCA features
+X_test_pca_scaled = scaler_classifier.transform(X_test_pca[pca_features_for_hmm])
+X_test_pca['predicted_regime_Est'] = clf.predict(X_test_pca_scaled)
 
 # --- Step 5.25: Analyze Regime Properties ---
 logger.info("Analyzing final regime distributions...")
@@ -833,7 +993,7 @@ print(train_dist)
 logger.info(f"Train classifier regime distribution: {train_dist.to_dict()}")
 
 print("\nTest Data Regime Distribution:")
-test_dist = X_test['predicted_regime_Est'].value_counts()
+test_dist = X_test_pca['predicted_regime_Est'].value_counts()
 print(test_dist)
 logger.info(f"Test regime distribution: {test_dist.to_dict()}")
 
@@ -842,7 +1002,7 @@ logger.info("Creating output regime dataframes...")
 print("💾 Creating output files...")
 
 train_regimes_df = X_train[['timestamp', 'predicted_regime', 'predicted_regime_Est']].copy()
-test_regimes_df = X_test[['ID', 'predicted_regime_Est']].copy()
+test_regimes_df = X_test_pca[['ID', 'predicted_regime_Est']].copy()
 
 # --- Step 5.75: Output Regime DataFrames ---
 # Save to CSV files
@@ -850,6 +1010,13 @@ train_regimes_df.to_csv('train_regimes.csv', index=False)
 test_regimes_df.to_csv('test_regimes.csv', index=False)
 
 print("\n✅ Output saved to train_regimes.csv and test_regimes.csv")
-logger.info("Regime detection pipeline completed successfully")
+print(f"\n📊 Final Dataset Summary:")
+print(f"   🔧 PCA Train Dataset: {pca_train_file}")
+print(f"   🔧 PCA Test Dataset: {pca_test_file}")
+print(f"   🎯 Top 500 Train Dataset: {top500_train_file}")
+print(f"   🎯 Top 500 Test Dataset: {top500_test_file}")
+print(f"   📋 Regime Predictions: train_regimes.csv, test_regimes.csv")
+print(f"   🎯 Classifier uses: {len(pca_features_for_hmm)} PCA components (same as HMM)")
+logger.info("Regime detection pipeline completed successfully with PCA features")
 
 
