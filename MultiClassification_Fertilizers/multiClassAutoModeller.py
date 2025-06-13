@@ -184,7 +184,6 @@ lgbm_goss_params = {
 }
 
 xgb_params = {
-    # https://www.kaggle.com/code/patrykszcz/simple-xgb-model-5-fold
     "device": "gpu",
     "max_depth": 12,
     "colsample_bytree": 0.467,

@@ -1,0 +1,46 @@
+# Core dependencies for Enhanced Multi-Class Classification Ensemble Framework
+numpy>=1.21.0
+pandas>=1.3.0
+scikit-learn>=1.0.0
+matplotlib>=3.5.0
+seaborn>=0.11.0
+
+# GPU support and parallel processing
+torch>=1.12.0  # For GPU detection and CUDA support
+
+# Optional ML libraries (install as needed)
+lightgbm>=3.3.0
+xgboost>=1.6.0
+catboost>=1.0.0
+
+# AutoGluon (optional - can be large installation)
+# autogluon>=0.8.0
+
+# Additional utilities
+joblib>=1.1.0
+
+# For visualization and data handling
+tqdm>=4.64.0
+
+# Note: AutoGluon is commented out as it's a large package.
+# Uncomment the autogluon line if you want to use AutoGluon models.
+# 
+# GPU Installation Instructions:
+# ==============================
+# 
+# For CPU-only installation:
+# pip install -r requirements.txt
+#
+# For GPU support (recommended for T4 x 2 setup):
+# pip install -r requirements.txt
+# 
+# For CUDA 11.8:
+# pip install torch==2.0.1 --index-url https://download.pytorch.org/whl/cu118
+# pip install lightgbm[gpu] xgboost[gpu]
+#
+# For CUDA 12.1:
+# pip install torch==2.0.1 --index-url https://download.pytorch.org/whl/cu121
+# pip install lightgbm[gpu] xgboost[gpu]
+#
+# To install with AutoGluon:
+# pip install autogluon 
