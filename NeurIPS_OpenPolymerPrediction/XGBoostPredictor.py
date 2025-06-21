@@ -31,6 +31,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+
 def check_gpu_availability():
     """Check if GPU is available and return appropriate XGBoost parameters."""
     try:
@@ -48,6 +49,58 @@ def check_gpu_availability():
             'tree_method': 'hist',
             'predictor': 'cpu_predictor'
         }
+    
+
+def load_data():
+    """Load competition data and additional datasets.
+    
+    Returns:
+        Tuple: (train_smiles, train_targets, test_df)
+    """
+    logger.info("Loading competition data...")
+    
+    # Load training and test data
+    comp_train_df = pd.read_csv('/kaggle/input/neurips-open-polymer-prediction-2025/train.csv')
+    test = pd.read_csv('/kaggle/input/neurips-open-polymer-prediction-2025/test.csv')
+    logger.info(f"Loaded {len(comp_train_df)} competition training samples and {len(test)} test samples")
+    
+    # Load additional datasets
+    logger.info("Loading additional datasets...")
+    extra_tg_file_path = "/kaggle/input/smiles-tg/Tg_SMILES_class_pid_polyinfo_median.csv"
+    extra_tc_file_path = "/kaggle/input/tc-smiles/Tc_SMILES.csv"
+    
+    extra_tg_df = pd.read_csv(extra_tg_file_path)
+    extra_tc_df = pd.read_csv(extra_tc_file_path)
+    logger.info(f"Loaded {len(extra_tg_df)} additional Tg samples and {len(extra_tc_df)} additional Tc samples")
+    
+    # Prepare extra_tg_df dataframe 
+    extra_tg_clean = extra_tg_df[['SMILES', 'PID', 'Tg']].rename(columns={'PID': 'id'})
+    extra_tg_clean[['FFV', 'Tc', 'Density', 'Rg']] = float('nan')
+
+    # Prepare extra_tc_df  dataframe 
+    extra_tc_clean = extra_tc_df[['SMILES', 'TC_mean']].rename(columns={'TC_mean': 'Tc'})
+    extra_tc_clean['id'] = range(len(comp_train_df) + len(extra_tg_df), len(comp_train_df) + len(extra_tg_df) + len(extra_tc_df))
+    extra_tc_clean[['Tg', 'FFV', 'Density', 'Rg']] = float('nan')
+
+    # Reorder columns to match comp_train_df dataframe
+    extra_tg_clean = extra_tg_clean[['id', 'SMILES', 'Tg', 'FFV', 'Tc', 'Density', 'Rg']]
+    extra_tc_clean = extra_tc_clean[['id', 'SMILES', 'Tg', 'FFV', 'Tc', 'Density', 'Rg']]
+
+    # Combine all datasets into train_df
+    train_df = pd.concat([comp_train_df, extra_tg_clean, extra_tc_clean], ignore_index=True)
+    logger.info(f"Combined dataset has {len(train_df)} total training samples")
+    
+    # Extract SMILES and target properties
+    train_smiles = train_df['SMILES'].values
+    train_targets = train_df[['Tg', 'FFV', 'Tc', 'Density', 'Rg']]
+    
+    # Log data statistics
+    for col in train_targets.columns:
+        valid_count = train_targets[col].notna().sum()
+        logger.info(f"Property {col}: {valid_count} valid samples")
+    
+    return train_smiles, train_targets, test
+
 
 class PolymerPredictor:
     def __init__(self, n_estimators: int = 1000, learning_rate: float = 0.01):
@@ -282,7 +335,7 @@ class PolymerPredictor:
             model.fit(
                 X_scaled, y_prop,
                 eval_set=[(X_scaled, y_prop)],
-                early_stopping_rounds=50,
+                early_stopping_rounds=100,
                 verbose=100
             )
             
@@ -362,7 +415,7 @@ class PolymerPredictor:
 
             logger.info(f"Training XGBoost model for {property_name} with best parameters: {model_params}")
             model = xgb.XGBRegressor(**model_params)
-            model.fit(X_scaled, y_prop, eval_set=[(X_scaled, y_prop)], early_stopping_rounds=50, verbose=100)
+            model.fit(X_scaled, y_prop, eval_set=[(X_scaled, y_prop)], early_stopping_rounds=100, verbose=100)
             self.models[property_name] = model
 
             # Save model and scaler
@@ -377,30 +430,7 @@ class PolymerPredictor:
 
         logger.info("Completed fit and predict for all properties.")
         return pd.DataFrame(predictions)
-
-def load_data():
-    """Load competition data.
     
-    Returns:
-        Tuple: (train_smiles, train_targets, test_df)
-    """
-    logger.info("Loading competition data...")
-    
-    # Load training and test data
-    train = pd.read_csv('/kaggle/input/neurips-open-polymer-prediction-2025/train.csv')
-    test = pd.read_csv('/kaggle/input/neurips-open-polymer-prediction-2025/test.csv')
-    logger.info(f"Loaded {len(train)} training samples and {len(test)} test samples")
-    
-    # Extract SMILES and target properties
-    train_smiles = train['SMILES'].values
-    train_targets = train[['Tg', 'FFV', 'Tc', 'Density', 'Rg']]
-    
-    # Log data statistics
-    for col in train_targets.columns:
-        valid_count = train_targets[col].notna().sum()
-        logger.info(f"Property {col}: {valid_count} valid samples")
-    
-    return train_smiles, train_targets, test
 
 if __name__ == "__main__":
     # Load data
@@ -408,16 +438,16 @@ if __name__ == "__main__":
     
     #--- Optuna Hyperparameter Optimization Usage ---
     param_space = {
-        'n_estimators': (1000, 4500),                # Integer range
-        'learning_rate': (0.01, 0.4),              # Float range (log scale for learning_rate)
-        'max_depth': (7, 10),                       # Integer range
-        'subsample': (0.6, 0.8),                    # Float range
-        'colsample_bytree': (0.6, 0.8),             # Float range
+        'n_estimators': (2500, 6500),                # Integer range
+        'learning_rate': (0.01, 0.05),              # Float range (log scale for learning_rate)
+        'max_depth': (10, 32),                       # Integer range
+        'subsample': (0.5, 0.8),                    # Float range
+        'colsample_bytree': (0.5, 0.8),             # Float range
         'gamma': (0, 1.0),                          # Float range
         'reg_alpha': (0, 1.0),                      # Float range
         'reg_lambda': (0, 2.0),                     # Float range
     }
-    n_trials = 30
+    n_trials = 15
     logger.info("Initializing and training model with Optuna hyperparameter optimization...")
     model = PolymerPredictor()
     
@@ -476,173 +506,4 @@ if __name__ == "__main__":
     })
     logger.info("Saving submission file...")
     submission.to_csv('/kaggle/working/submission.csv', index=False)
-    logger.info("Process completed successfully!") 
-
-    # === Alternative: Load saved models, refit with best parameters, and predict ===
-    """
-    # Load data
-    train_smiles, train_targets, test = load_data()
-    
-    # Initialize predictor
-    model = PolymerPredictor()
-    
-    # Dictionary to store best parameters for each property
-    best_params_per_property = {}
-    
-    # Define the base path for saved models
-    base_path = '/kaggle/working'
-    
-    # Load saved models and extract their parameters
-    for property_name in train_targets.columns:
-        model_path = os.path.join(base_path, f'{property_name}_model.joblib')
-        scaler_path = os.path.join(base_path, f'{property_name}_scaler.joblib')
-        
-        logger.info(f"\nChecking for saved model at: {model_path}")
-        logger.info(f"Checking for saved scaler at: {scaler_path}")
-        
-        if os.path.exists(model_path) and os.path.exists(scaler_path):
-            logger.info(f"Found saved files for {property_name}")
-            try:
-                # Load and verify the model
-                saved_model = joblib.load(model_path)
-                logger.info(f"Successfully loaded model for {property_name}")
-                
-                # Print raw model parameters for verification
-                logger.info(f"\nRaw parameters from saved model for {property_name}:")
-                raw_params = saved_model.get_params()
-                for param, value in raw_params.items():
-                    logger.info(f"{param}: {value}")
-                
-                # Extract specific parameters we need
-                best_params = {
-                    'n_estimators': raw_params.get('n_estimators'),
-                    'learning_rate': raw_params.get('learning_rate'),
-                    'max_depth': raw_params.get('max_depth'),
-                    'subsample': raw_params.get('subsample'),
-                    'colsample_bytree': raw_params.get('colsample_bytree'),
-                    'gamma': raw_params.get('gamma'),
-                    'reg_alpha': raw_params.get('reg_alpha'),
-                    'reg_lambda': raw_params.get('reg_lambda')
-                }
-                
-                # Verify the extracted parameters
-                logger.info(f"\nExtracted parameters for {property_name}:")
-                for param, value in best_params.items():
-                    logger.info(f"{param}: {value}")
-                
-                best_params_per_property[property_name] = best_params
-                
-                # Load the scaler
-                model.scalers[property_name] = joblib.load(scaler_path)
-                logger.info(f"Successfully loaded scaler for {property_name}")
-                
-            except Exception as e:
-                logger.error(f"Error loading model or scaler for {property_name}: {str(e)}")
-                continue
-        else:
-            logger.warning(f"Saved files not found for {property_name}")
-            if not os.path.exists(model_path):
-                logger.warning(f"Model file missing: {model_path}")
-            if not os.path.exists(scaler_path):
-                logger.warning(f"Scaler file missing: {scaler_path}")
-    
-    # Print best parameters for each property
-    logger.info("\nBest hyperparameters for each property:")
-    best_params_df = pd.DataFrame(best_params_per_property).T
-    print("\nBest Hyperparameters per Property:")
-    print(best_params_df)
-    
-    # Verify we have parameters for all properties
-    missing_properties = set(train_targets.columns) - set(best_params_per_property.keys())
-    if missing_properties:
-        logger.warning(f"Missing parameters for properties: {missing_properties}")
-        raise ValueError("Not all properties have parameters loaded")
-    
-    # Extract features from training data
-    logger.info("Extracting features from training molecules...")
-    X_train = model._extract_features(train_smiles)
-    
-    # Train new models with best parameters
-    for property_name in train_targets.columns:
-        if property_name not in best_params_per_property:
-            continue
-            
-        logger.info(f"\nTraining new model for {property_name} with best parameters...")
-        valid_idx = ~train_targets[property_name].isna()
-        if not valid_idx.any():
-            logger.warning(f"No valid data for {property_name}, skipping...")
-            continue
-            
-        X_prop = X_train[valid_idx]
-        y_prop = train_targets[property_name][valid_idx]
-        
-        # Scale features
-        X_scaled = model.scalers[property_name].transform(X_prop)
-        
-        # Train new model with best parameters
-        model_params = best_params_per_property[property_name].copy()
-        model_params.update(model.xgb_params)  # Add GPU/CPU parameters
-        model_params['objective'] = 'reg:absoluteerror'
-        model_params['random_state'] = 42
-        
-        logger.info(f"Training XGBoost model for {property_name} with parameters: {model_params}")
-        new_model = xgb.XGBRegressor(**model_params)
-        new_model.fit(
-            X_scaled, y_prop,
-            eval_set=[(X_scaled, y_prop)],
-            early_stopping_rounds=50,
-            verbose=100
-        )
-        model.models[property_name] = new_model
-        
-        # Save the newly trained model
-        model_path = os.path.join(base_path, f'{property_name}_model_refit.joblib')
-        joblib.dump(new_model, model_path)
-        logger.info(f"Saved refit model for {property_name} to {model_path}")
-    
-    # Extract features from test SMILES
-    logger.info("Extracting features from test molecules...")
-    X_test = model._extract_features(test['SMILES'].values)
-    
-    # Make predictions
-    logger.info("Making predictions using refit models...")
-    predictions = {}
-    for property_name, model_obj in model.models.items():
-        logger.info(f"Predicting {property_name}...")
-        X_test_scaled = model.scalers[property_name].transform(X_test)
-        preds = model_obj.predict(X_test_scaled)
-        predictions[property_name] = preds
-        
-        # Validate predictions
-        logger.info(f"Property {property_name} predictions - Shape: {preds.shape}, Min: {preds.min():.2f}, Max: {preds.max():.2f}")
-    
-    # Create submission DataFrame
-    submission = pd.DataFrame({
-        'id': test['id'].values,  # Ensure we're using values
-        **predictions
-    })
-    
-    # Validate submission format
-    logger.info(f"Submission shape: {submission.shape}")
-    logger.info(f"Submission columns: {submission.columns.tolist()}")
-    logger.info(f"Submission dtypes:\n{submission.dtypes}")
-    
-    # Check for any missing values
-    missing_values = submission.isnull().sum()
-    if missing_values.any():
-        logger.warning(f"Missing values found:\n{missing_values[missing_values > 0]}")
-        # Fill missing values with median of each column
-        for col in submission.columns:
-            if submission[col].isnull().any():
-                median_val = submission[col].median()
-                submission[col] = submission[col].fillna(median_val)
-                logger.info(f"Filled missing values in {col} with median: {median_val}")
-    
-    # Ensure all columns are in the correct order
-    expected_columns = ['id', 'Tg', 'FFV', 'Tc', 'Density', 'Rg']
-    submission = submission[expected_columns]
-    
-    # Save submission
-    submission.to_csv(os.path.join(base_path, 'submission_refit_models.csv'), index=False)
-    logger.info("Predictions completed using refit models!")
-    """ 
+    logger.info("Process completed successfully!")
