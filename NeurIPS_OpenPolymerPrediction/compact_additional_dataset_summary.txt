@@ -1,0 +1,44 @@
+COMPACT ADDITIONAL DATASET SUMMARY
+==================================================
+Total samples: 3391
+
+PROPERTY STATISTICS:
+------------------------------
+Tg:
+  Valid samples: 3391/3391 (100.0%)
+  Mean: 204.8475
+  Std: 102.9209
+  Range: [-139.0000, 495.0000]
+
+FFV: No valid data
+
+Tc:
+  Valid samples: 162/3391 (4.8%)
+  Mean: 0.1835
+  Std: 0.0523
+  Range: [0.0755, 0.4240]
+
+Density: No valid data
+
+Rg: No valid data
+
+CH4: No valid data
+
+CO2: No valid data
+
+H2: No valid data
+
+N2: No valid data
+
+O2: No valid data
+
+DATASET STATISTICS:
+------------------------------
+tg_samples: 3391
+tc_samples: 875
+ch4_samples: 93
+co2_samples: 103
+h2_samples: 81
+n2_samples: 111
+o2_samples: 114
+gas_data_merged: True

@@ -1,0 +1,70 @@
+ENHANCED ADDITIONAL DATASET SUMMARY
+==================================================
+Total samples: 7612
+
+PROPERTY STATISTICS:
+------------------------------
+Tg:
+  Valid samples: 7208/7612 (94.7%)
+  Mean: 141.4060
+  Std: 112.3969
+  Range: [-139.0000, 495.0000]
+
+FFV: No valid data
+
+Tc:
+  Valid samples: 875/7612 (11.5%)
+  Mean: 0.2566
+  Std: 0.1013
+  Range: [0.0465, 1.5900]
+
+Density: No valid data
+
+Rg: No valid data
+
+CH4:
+  Valid samples: 2/7612 (0.0%)
+  Mean: 13.6750
+  Std: 12.4804
+  Range: [4.8500, 22.5000]
+
+CO2:
+  Valid samples: 5/7612 (0.1%)
+  Mean: 42.8184
+  Std: 73.1151
+  Range: [0.0018, 170.0000]
+
+H2:
+  Valid samples: 4/7612 (0.1%)
+  Mean: 11.3500
+  Std: 16.6498
+  Range: [0.9300, 36.0000]
+
+N2:
+  Valid samples: 5/7612 (0.1%)
+  Mean: 2.0434
+  Std: 3.8471
+  Range: [0.0002, 8.8500]
+
+O2:
+  Valid samples: 6/7612 (0.1%)
+  Mean: 4.3737
+  Std: 8.5604
+  Range: [0.0003, 21.5000]
+
+DATASET STATISTICS:
+------------------------------
+tg_samples: 7208
+tg_valid_smiles: 3391
+tc_samples: 875
+ch4_samples: 681
+ch4_valid_smiles: 93
+co2_samples: 754
+co2_valid_smiles: 103
+h2_samples: 509
+h2_valid_smiles: 81
+n2_samples: 794
+n2_valid_smiles: 111
+o2_samples: 805
+o2_valid_smiles: 114
+gas_data_merged: True

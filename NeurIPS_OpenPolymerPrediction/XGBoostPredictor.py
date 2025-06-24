@@ -52,43 +52,45 @@ def check_gpu_availability():
     
 
 def load_data():
-    """Load competition data and additional datasets.
+    """Load competition data and additional datasets from the compact dataset.
     
     Returns:
         Tuple: (train_smiles, train_targets, test_df)
     """
     logger.info("Loading competition data...")
     
-    # Load training and test data
-    comp_train_df = pd.read_csv('/kaggle/input/neurips-open-polymer-prediction-2025/train.csv')
-    test = pd.read_csv('/kaggle/input/neurips-open-polymer-prediction-2025/test.csv')
+    # Load training and test data (competition)
+    comp_train_df = pd.read_csv('RawData/train.csv')
+    test = pd.read_csv('RawData/test.csv')
     logger.info(f"Loaded {len(comp_train_df)} competition training samples and {len(test)} test samples")
     
-    # Load additional datasets
-    logger.info("Loading additional datasets...")
-    extra_tg_file_path = "/kaggle/input/smiles-tg/Tg_SMILES_class_pid_polyinfo_median.csv"
-    extra_tc_file_path = "/kaggle/input/tc-smiles/Tc_SMILES.csv"
+    # Load compact additional dataset
+    logger.info("Loading compact additional dataset...")
+    compact_additional_df = pd.read_csv('compact_additional_dataset.csv')
+    logger.info(f"Loaded {len(compact_additional_df)} additional samples from compact_additional_dataset.csv")
     
-    extra_tg_df = pd.read_csv(extra_tg_file_path)
-    extra_tc_df = pd.read_csv(extra_tc_file_path)
-    logger.info(f"Loaded {len(extra_tg_df)} additional Tg samples and {len(extra_tc_df)} additional Tc samples")
+    # Filter for valid SMILES in competition data (using the same logic as before)
+    def is_valid_smiles(smiles):
+        if pd.isna(smiles) or not isinstance(smiles, str):
+            return False
+        if not smiles.startswith('*'):
+            return False
+        return True
+    comp_valid_mask = comp_train_df['SMILES'].apply(is_valid_smiles)
+    comp_train_df = comp_train_df[comp_valid_mask].copy()
+    logger.info(f"Valid competition samples: {len(comp_train_df)}")
     
-    # Prepare extra_tg_df dataframe 
-    extra_tg_clean = extra_tg_df[['SMILES', 'PID', 'Tg']].rename(columns={'PID': 'id'})
-    extra_tg_clean[['FFV', 'Tc', 'Density', 'Rg']] = float('nan')
-
-    # Prepare extra_tc_df  dataframe 
-    extra_tc_clean = extra_tc_df[['SMILES', 'TC_mean']].rename(columns={'TC_mean': 'Tc'})
-    extra_tc_clean['id'] = range(len(comp_train_df) + len(extra_tg_df), len(comp_train_df) + len(extra_tg_df) + len(extra_tc_df))
-    extra_tc_clean[['Tg', 'FFV', 'Density', 'Rg']] = float('nan')
-
-    # Reorder columns to match comp_train_df dataframe
-    extra_tg_clean = extra_tg_clean[['id', 'SMILES', 'Tg', 'FFV', 'Tc', 'Density', 'Rg']]
-    extra_tc_clean = extra_tc_clean[['id', 'SMILES', 'Tg', 'FFV', 'Tc', 'Density', 'Rg']]
-
-    # Combine all datasets into train_df
-    train_df = pd.concat([comp_train_df, extra_tg_clean, extra_tc_clean], ignore_index=True)
-    logger.info(f"Combined dataset has {len(train_df)} total training samples")
+    # Combine competition and additional data (excluding overlap)
+    comp_smiles_set = set(comp_train_df['SMILES'])
+    additional_df = compact_additional_df[~compact_additional_df['SMILES'].isin(comp_smiles_set)].copy()
+    
+    # Prepare columns for training
+    additional_df = additional_df[['SMILES', 'Tg', 'FFV', 'Tc', 'Density', 'Rg']]
+    comp_train_df = comp_train_df[['SMILES', 'Tg', 'FFV', 'Tc', 'Density', 'Rg']]
+    
+    # Concatenate competition and additional data
+    train_df = pd.concat([comp_train_df, additional_df], ignore_index=True)
+    logger.info(f"Final combined dataset has {len(train_df)} total training samples")
     
     # Extract SMILES and target properties
     train_smiles = train_df['SMILES'].values

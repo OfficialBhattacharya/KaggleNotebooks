@@ -1,0 +1,47 @@
+MASTER ADDITIONAL DATASET SUMMARY
+==================================================
+Total samples: 1003224
+
+PROPERTY STATISTICS:
+------------------------------
+Tg:
+  Valid samples: 7208/1003224 (0.7%)
+  Mean: 141.4060
+  Std: 112.3969
+  Range: [-139.0000, 495.0000]
+
+FFV: No valid data
+
+Tc:
+  Valid samples: 875/1003224 (0.1%)
+  Mean: 0.2566
+  Std: 0.1013
+  Range: [0.0465, 1.5900]
+
+Density: No valid data
+
+Rg: No valid data
+
+CH4: No valid data
+
+CO2: No valid data
+
+H2: No valid data
+
+N2: No valid data
+
+O2: No valid data
+
+DATASET STATISTICS:
+------------------------------
+tg_samples: 7208
+tc_samples: 875
+ch4_samples: 681
+co2_samples: 754
+h2_samples: 509
+n2_samples: 794
+o2_samples: 805
+pi1m_samples: 995799
+pi1m_v2_samples: 995799
+gas_data_merged: True
+pi1m_unique_added: True
